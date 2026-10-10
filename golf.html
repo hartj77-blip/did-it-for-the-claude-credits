@@ -151,27 +151,50 @@ table.sc{border-collapse:collapse;width:100%;font-size:16px;min-width:440px}
 .mark.o2{border:1.5px solid var(--over);outline:1.5px solid var(--over);outline-offset:2px}
 .mark.cur{color:var(--flag)}
 
-@media (max-width:760px){
-  .hole-card{gap:10px;padding:8px 12px 10px 10px}
-  .hole-num{min-width:36px;padding-right:10px}
-  .hole-num .big{font-size:44px}
-  .hole-name{font-size:15px}
-  .facts{grid-template-columns:repeat(2,auto);gap:2px 14px;margin-top:6px}
-  .facts dd{font-size:16px}
-  .map-card{max-width:124px;padding:6px}
-  .tools button{font-size:11px;padding:4px 6px}
-  .monitor{left:calc(12px + env(safe-area-inset-left,0px));right:auto;top:calc(150px + env(safe-area-inset-top,0px));bottom:auto!important;width:calc(100vw - 172px - env(safe-area-inset-left,0px) - env(safe-area-inset-right,0px));box-sizing:border-box;padding:8px 10px}
-  .monitor.empty{display:none}
-  .mon-head .lbl{display:none}
-  #monResult{text-align:left}
-  .mon-grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:4px 8px}
-  .cell.x{display:none}
-  .cell .v{font-size:20px}
-  .club-card{width:176px;padding:8px 10px;gap:6px}
-  #cName{font-size:21px}
-  .meter{bottom:calc(150px + env(safe-area-inset-bottom,0px))!important}
+/* compact HUD: phones, tablets and narrow side panels */
+@media (max-width:999px),(max-height:699px){
+  .hole-card{gap:8px;padding:6px 10px 7px 8px}
+  .hole-num{min-width:0;padding-right:8px}
+  .hole-num .lbl{font-size:9px}
+  .hole-num .big{font-size:32px}
+  .hole-name{font-size:13px}
+  .hole-par{font-size:12px;gap:6px;margin-top:0}
+  .facts{gap:0 12px;margin-top:3px}
+  .facts dt{font-size:9px;letter-spacing:.1em}
+  .facts dd{font-size:14px}
+  .map-card{padding:5px;gap:4px}
+  .wind{gap:4px}.wind svg{width:18px;height:18px}.wind b{font-size:14px}.wind span{font-size:11px}
+  .tools{gap:3px}.tools button{font-size:10px;padding:3px 5px}
+  .club-card{width:auto;padding:6px 8px;gap:5px}
+  .club-row{gap:4px}.club-row button{width:28px;height:30px}
+  #cName{font-size:18px}.sub{font-size:11px}
+  .shape button{font-size:10px;padding:3px 0}
+  .lie-note{font-size:11px;max-width:170px}
   .keys{display:none}
-  .panel{padding:22px 20px}
+  .meter{width:min(400px,calc(100vw - 340px));min-width:220px;bottom:calc(12px + env(safe-area-inset-bottom,0px))!important}
+  .meter-top{margin-bottom:3px}
+  #mLabel{font-size:12px}#mValue{font-size:18px}
+  .bar{height:18px}
+  .scale{display:none}
+  .monitor{top:calc(90px + env(safe-area-inset-top,0px));left:calc(12px + env(safe-area-inset-left,0px));right:auto;bottom:auto!important;width:auto;padding:6px 10px}
+  .monitor.dim,.monitor.empty{display:none}
+  .mon-head{margin-bottom:2px}.mon-head .lbl{display:none}#monResult{font-size:12px;text-align:left}
+  .mon-grid{grid-template-columns:repeat(3,auto);gap:0 14px}
+  .cell.x,.cell.xs{display:none}
+  .cell .k{font-size:9px}.cell .v{font-size:18px}.cell .u{font-size:10px}
+  .aim-pad{gap:6px}.aim-pad button{width:40px;height:40px}
+  .swing{width:68px;height:68px;font-size:17px}
+  .b-title{font-size:clamp(30px,7vw,56px)}.b-sub{font-size:14px;margin-top:4px}
+  .banner{top:32%}
+  .tag{font-size:11px;padding:2px 6px}
+  .panel{padding:20px 20px}
+  h1{font-size:clamp(40px,9vw,72px)}
+  .controls{margin:14px 0 18px;font-size:14px}
+}
+@media (max-width:599px){
+  .map-card{max-width:100px}
+  .facts{gap:0 9px}
+  .meter{width:calc(100vw - 32px);min-width:0;bottom:calc(104px + env(safe-area-inset-bottom,0px))!important}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
@@ -229,7 +252,7 @@ table.sc{border-collapse:collapse;width:100%;font-size:16px;min-width:440px}
   <section class="card monitor bottom right dim empty" id="monitor" aria-label="Shot data">
     <div class="mon-head"><span class="lbl">Launch monitor</span><span id="monResult">Waiting for first shot</span></div>
     <div class="mon-grid">
-      <div class="cell"><span class="k">Ball spd</span><span class="v" id="sSpeed">—</span><span class="u">mph</span></div>
+      <div class="cell xs"><span class="k">Ball spd</span><span class="v" id="sSpeed">—</span><span class="u">mph</span></div>
       <div class="cell x"><span class="k">Launch</span><span class="v" id="sLaunch">—</span><span class="u">deg</span></div>
       <div class="cell x"><span class="k">Spin</span><span class="v" id="sSpin">—</span><span class="u">rpm</span></div>
       <div class="cell x"><span class="k">Apex</span><span class="v" id="sApex">—</span><span class="u">ft</span></div>
@@ -650,7 +673,7 @@ function disposeScene(s){s.group.traverse(o=>{if(o.geometry)o.geometry.dispose()
 /* ---------- minimap ---------- */
 const mini=$('mini'),mctx=mini.getContext('2d');let miniBase=null,mw=120,mh=200;
 function buildMinimap(H,cv){
-  const small=matchMedia('(max-width:760px)').matches,maxH=small?130:200,maxW=small?100:150;
+  const small=matchMedia('(max-width:999px),(max-height:699px)').matches,maxH=small?(innerHeight<500?84:110):200,maxW=small?80:150;
   mh=maxH;mw=maxH*H.W/H.L;if(mw>maxW){mw=maxW;mh=mw*H.L/H.W;}
   const dpr=Math.min(2,window.devicePixelRatio||1);mini.width=Math.round(mw*dpr);mini.height=Math.round(mh*dpr);mini.style.width=mw+'px';mini.style.height=mh+'px';
   miniBase=document.createElement('canvas');miniBase.width=mini.width;miniBase.height=mini.height;const c=miniBase.getContext('2d');
