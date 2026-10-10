@@ -296,7 +296,7 @@ table.sc{border-collapse:collapse;width:100%;font-size:16px;min-width:440px}
     <div class="controls">
       <kbd>← →</kbd><span>Aim, or drag across the course (hold Shift for fine aim)</span>
       <kbd>↑ ↓</kbd><span>Change club</span>
-      <kbd>Swipe</kbd><span>On the swing pad, pull down to load power, then swipe straight up through the ball. A crooked swipe sprays it; a slow one loses distance.</span>
+      <kbd>Swipe</kbd><span>Trackball style: on the swing pad, pull back, then flick up through the ball. Flick speed is power (past 100% gets wild), and an angled flick hooks or slices.</span>
       <kbd>Space</kbd><span>Keyboard option: hold to load power, release, then tap as the needle crosses the white zone</span>
       <kbd>Q · E</kbd><span>Shape the shot: draw or fade</span>
       <kbd>V</kbd><span>Look at the landing area</span>
@@ -792,7 +792,7 @@ function launchParams(power,acc){
   if(lie===BUNKER&&c.wedge){spdF=.9;spinF=.7;}
   if(lie===ROUGH)la+=1.5;
   if(c.tee&&lie!==TEE){spdF*=.9;la-=2;}
-  const p=clamp(power,.02,1),speed=c.speed*Math.pow(p,.85)*spdF,rpm=c.spin*(.55+.45*p)*spinF;
+  const p=clamp(power,.02,1.12),speed=c.speed*Math.pow(p,.85)*spdF,rpm=c.spin*(.55+.45*Math.min(1,p))*spinF;
   const startOff=-game.shape*.05+acc*.03,tilt=game.shape*.16+acc*.2,yaw=game.yaw-startOff;
   const dx=Math.sin(yaw),dz=Math.cos(yaw),rx=-dz,rz=dx,lr=la*Math.PI/180,w=rpm*TAU/60;
   return{vx:speed*Math.cos(lr)*dx,vy:speed*Math.sin(lr),vz:speed*Math.cos(lr)*dz,wx:w*Math.cos(tilt)*rx,wy:-w*Math.sin(tilt),wz:w*Math.cos(tilt)*rz,speed,launch:la,rpm,tilt};
@@ -972,7 +972,7 @@ function update(dt){
     if(st==='aim'){const rate=(c.putt?.22:.55)*(keys.ShiftLeft||keys.ShiftRight?.25:1);if(keys.ArrowLeft||hold.left)game.yaw+=rate*dt;if(keys.ArrowRight||hold.right)game.yaw-=rate*dt;}
     if(st==='power'){game.power+=game.powerDir*dt/(c.putt?1.7:1.15);if(game.power>=1){game.power=1;game.powerDir=-1;}if(game.power<=0&&game.powerDir<0){game.power=0;game.state='aim';}}
     if(st==='accuracy'){game.needle-=dt*(c.putt?1.15:1.75);if(game.needle<-.15)fire(-.15);}
-    if(isAiming(game.state)){refreshPrediction(game.state==='aim'?0:((game.state==='power'||game.state==='pull')?game.power:game.locked));aimCam();}
+    if(isAiming(game.state)){refreshPrediction((game.state==='aim'||game.state==='pull'||game.state==='through')?0:(game.state==='power'?game.power:game.locked));aimCam();}
   }
   else if(st==='flight'){
     const s=game.shot,f=s.sim.frames,n=f.length/3;s.t+=dt*s.mul;
@@ -1097,32 +1097,37 @@ pad.addEventListener('pointerdown',e=>{
   e.preventDefault();sfx.init();
   if(game.state!=='aim')return;
   try{pad.setPointerCapture(e.pointerId);}catch(_){}
-  sw={id:e.pointerId,x0:e.clientX,y0:e.clientY,maxY:e.clientY,botX:e.clientX,tBot:performance.now(),trail:[[e.clientX,e.clientY]],phase:'pull'};
+  sw={id:e.pointerId,x0:e.clientX,y0:e.clientY,maxY:e.clientY,botX:e.clientX,tBot:performance.now(),trail:[[e.clientX,e.clientY,e.timeStamp||performance.now()]],phase:'pull'};
   swLast=null;padMsg='';game.state='pull';game.power=0;$('monitor').classList.add('dim');
 });
 pad.addEventListener('pointermove',e=>{
   if(!sw||e.pointerId!==sw.id)return;
   const evs=e.getCoalescedEvents?e.getCoalescedEvents():[e];
-  for(const ev of evs.length?evs:[e]){if(swStep(ev.clientX,ev.clientY))break;}
+  for(const ev of evs.length?evs:[e]){if(swStep(ev.clientX,ev.clientY,ev.timeStamp||performance.now()))break;}
 });
-function swStep(x,y){
+function swStep(x,y,t){
   if(!sw)return true;
-  sw.trail.push([x,y]);if(sw.trail.length>300)sw.trail.shift();
+  sw.trail.push([x,y,t]);if(sw.trail.length>300)sw.trail.shift();
   if(sw.phase==='pull'){
-    if(y>=sw.maxY){sw.maxY=y;sw.botX=x;sw.tBot=performance.now();game.power=clamp((y-sw.y0)/swTravel(),0,1);}
-    else if(sw.maxY-y>10){if(game.power<.03){return false;}sw.phase='through';sw.ti=sw.trail.length-1;game.locked=game.power;game.state='through';}
-  }else if(y<=sw.y0){swHit(x,y);return true;}
+    if(y>=sw.maxY){sw.maxY=y;sw.botX=x;sw.bi=sw.trail.length-1;sw.tBot=performance.now();game.power=clamp((y-sw.y0)/swTravel(),0,1);}
+    else if(sw.maxY-y>10){if(game.power<.12){padMsg='Pull back further first';return false;}sw.phase='through';sw.ti=sw.trail.length-1;game.locked=game.power;game.state='through';}
+  }else if(y<=sw.y0){swHit(x,y,t);return true;}
   return false;
 }
-function swHit(x,y){
-  const c=CLUBS[game.club],dt=Math.max(.016,(performance.now()-sw.tBot)/1000),dist=sw.maxY-y,speed=dist/dt;
+function swHit(x,y,t){
+  const c=CLUBS[game.club],tr=sw.trail,tNow=t||performance.now();
+  // speed over the last ~70ms of the forward stroke
+  const bi=sw.bi||0;let j=tr.length-1;while(j>bi&&tNow-tr[j-1][2]<70)j--;
+  if(j>bi&&tNow-tr[j][2]<12)j--;const dt=Math.max(.012,(tNow-tr[j][2])/1000),speed=Math.max(0,tr[j][1]-y)/dt;
+  const depth=game.locked,cap=c.putt?1:Math.min(1.12,.3+.85*depth);
+  let pw=Math.min(cap,speed/(swTravel()*12));if(c.putt)pw=Math.min(1,pw*1.15);
+  pw=Math.max(.03,pw);
   const ang=Math.atan2(x-sw.botX,sw.maxY-y),tol=c.putt?.2:.13;
   let acc=clamp(ang/tol,-3,3),note;
-  if(Math.abs(acc)<.35){acc=0;note='Pure strike';}else if(Math.abs(acc)<=1)note=acc>0?'Slightly right':'Slightly left';else note=acc>0?'Pushed right':'Pulled left';
-  let pw=game.locked;
-  if(!c.putt){const need=swTravel()*(1.4+2.6*pw),f=clamp(.8+.2*speed/need,.8,1);if(f<.97)note+=', slow tempo';pw*=f;}
-  swLast={trail:sw.trail.slice(),botX:sw.botX,maxY:sw.maxY,y0:sw.y0,x0:sw.x0,acc,t:performance.now()};
-  padMsg=note;sw=null;game.accNote=note;executeShot(pw,acc);
+  if(Math.abs(acc)<.35){acc=0;note='Pure strike';}else if(Math.abs(acc)<=1)note=acc>0?'Slight fade':'Slight draw';else note=acc>0?'Big slice':'Big hook';
+  if(pw>1){acc+=(Math.random()-.5)*(pw-1)*30;note='Over-swing! '+note;}
+  swLast={trail:tr.slice(),botX:sw.botX,maxY:sw.maxY,y0:sw.y0,x0:sw.x0,acc,pw,t:performance.now()};
+  game.locked=pw;padMsg=note;sw=null;game.accNote=note;executeShot(pw,acc);
 }
 function swEnd(e){
   if(!sw||e.pointerId!==sw.id)return;
@@ -1142,7 +1147,7 @@ function padUI(){
   g.strokeStyle='rgba(238,244,236,.18)';g.lineWidth=2;g.setLineDash([4,5]);g.beginPath();g.moveTo(bx,by);g.lineTo(bx,Math.min(h-30,by+tr));g.stroke();g.setLineDash([]);
   g.strokeStyle='rgba(243,198,63,.7)';g.beginPath();g.moveTo(bx-12,by+tr);g.lineTo(bx+12,by+tr);g.stroke();
   // power fill
-  const p=st==='pull'?game.power:st==='through'?game.locked:0;
+  const p=(st==='pull'||st==='through')?game.power:0;
   if(p>0){const grd=g.createLinearGradient(0,by,0,by+tr);grd.addColorStop(0,'#2f7a45');grd.addColorStop(.7,'#8cc653');grd.addColorStop(1,'#f3c63f');g.strokeStyle=grd;g.lineWidth=10;g.lineCap='round';g.beginPath();g.moveTo(bx,by);g.lineTo(bx,by+p*tr);g.stroke();}
   // straight-line cone and forward swipe
   if(src&&(st==='through'||swLast===src)){
@@ -1155,12 +1160,12 @@ function padUI(){
   g.fillStyle='#fff';g.shadowColor='rgba(0,0,0,.5)';g.shadowBlur=6;g.beginPath();g.arc(bx,by,9,0,TAU);g.fill();g.shadowBlur=0;
   // text
   let big,small;
-  if(st==='pull'){big=Math.round(game.power*100)+'%';small=carryText();}
-  else if(st==='through'){big='Swipe!';small=Math.round(game.locked*100)+'% · '+carryText();}
-  else if((st==='flight'||st==='result')&&swLast){big=Math.round(game.locked*100)+'%';small='power used';}
-  else{big='Pull';small=c.putt?'to putt':'to swing';}
+  if(st==='pull'){big='Back';small='max '+Math.round((c.putt?1:Math.min(1.12,.3+.85*game.power))*100)+'%';}
+  else if(st==='through'){big='Rip it!';small='speed = power';}
+  else if((st==='flight'||st==='result')&&swLast){big=Math.round(swLast.pw*100)+'%';small='power';}
+  else{big='Pull';small=c.putt?'then roll it':'then flick up';}
   const html=big+'<small>'+small+'</small>';if(padRead.innerHTML!==html)padRead.innerHTML=html;
-  const hint=padMsg||(c.putt?'Pull down, then swipe straight up':'Pull down, then swipe up');if(padHint.textContent!==hint)padHint.textContent=hint;
+  const hint=padMsg||(c.putt?'Gentle roll up. Speed sets distance':'Pull back, flick up. Speed is power');if(padHint.textContent!==hint)padHint.textContent=hint;
 }
 const padRead=$('padRead'),padHint=$('padHint');
 function carryText(){const c=CLUBS[game.club];if(c.putt){const pp=game.state==='pull'?game.power:game.locked;return Math.round(game.puttFull*pp*M2FT)+' ft';}
