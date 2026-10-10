@@ -1,0 +1,17 @@
+{
+  "name": "card-club",
+  "version": "1.0.0",
+  "description": "Multiplayer browser card room: Texas Hold'em, Spades, Gin Rummy and Blackjack with shared chips and score keeping.",
+  "main": "server/index.js",
+  "private": true,
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node test/run.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
