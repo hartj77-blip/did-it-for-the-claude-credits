@@ -1,0 +1,10 @@
+# One-click deploy of Card Club on Render (https://render.com): New > Blueprint > pick this repo.
+services:
+  - type: web
+    name: card-club
+    runtime: node
+    plan: free
+    rootDir: card-club
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz

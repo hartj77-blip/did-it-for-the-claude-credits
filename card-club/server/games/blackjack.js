@@ -106,6 +106,11 @@ function act(s, playerId, action, ctx) {
       maybeDeal(s, ctx);
       return;
     }
+    if (action.type === 'unbet') {
+      delete s.bets[playerId];
+      delete s.skipping[playerId];
+      return;
+    }
     if (action.type === 'deal') {
       if (!Object.keys(s.bets).length) throw new Error('Nobody has bet yet');
       deal(s, ctx);
