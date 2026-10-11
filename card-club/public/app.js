@@ -23,6 +23,7 @@
     sound: store.get('cc_sound') !== 'off',
     retry: 0,
     status: null, // connecting/hosting message shown on the landing page
+    error: null, // why the last join attempt failed (shown until the next attempt)
     ui: { raiseTo: null, raiseKey: '', bet: 0, selected: null, pendingStage: false },
   };
   if (S.wantRoom) S.wantRoom = S.wantRoom.toUpperCase();
@@ -109,23 +110,49 @@
     }
   }
 
-  // P2P: connect to a friend's room. Keeps retrying if we drop out mid-game.
-  function joinRoom(code) {
+  // P2P: connect to a friend's room. Keeps retrying if we drop out mid-game, and
+  // keeps waiting for a few minutes if the host's tab isn't reachable yet (phones
+  // pause background tabs, so the host may just need to switch back to it).
+  const JOIN_PATIENCE = 3 * 60 * 1000;
+  function joinRoom(code, waitingSince = Date.now()) {
     S.wantRoom = code;
-    if (!S.room) { S.status = `Connecting to room ${code}…`; render(); }
+    S.error = null;
+    S.joinAttempt = (S.joinAttempt || 0) + 1;
+    const attempt = S.joinAttempt;
+    const waited = Date.now() - waitingSince;
+    if (!S.room) {
+      S.status = waited < 5000
+        ? `Connecting to room ${code}…`
+        : `Waiting for the host of room ${code}… Ask them to keep Card Club open on their screen.`;
+      render();
+    }
     attach(P2P.join(code), () => send({ t: 'join', code, name: S.name }), (e) => {
+      if (attempt !== S.joinAttempt) return; // cancelled or superseded
       if (S.room && S.room.code === code) {
         if (S.retry === 0) toast('Lost connection to the host. Reconnecting…');
         const delay = Math.min(10000, 1000 * 2 ** S.retry++);
         setTimeout(() => { if (S.room && S.room.code === code && !S.connected) joinRoom(code); }, delay);
         return;
       }
+      if (e.reason === 'unreachable' && Date.now() - waitingSince < JOIN_PATIENCE) {
+        setTimeout(() => { if (attempt === S.joinAttempt && !S.room) joinRoom(code, waitingSince); }, 3000);
+        return;
+      }
       S.status = null;
-      toast(e.reason === 'unreachable'
-        ? `Couldn't reach room ${code}. Make sure the host has the room open, then try again.`
-        : `Couldn't connect to room ${code} (${e.reason}).`);
+      S.error = {
+        unreachable: `Room ${code} isn't open right now. Check the code, and make sure the host has Card Club open on their screen (not in a background tab), then try again.`,
+        blocked: `Found room ${code} but couldn't connect to the host. A network is probably blocking it: try switching between Wi-Fi and mobile data (on your side or the host's), or avoid work/school Wi-Fi.`,
+        'no-signaling': "Couldn't reach the matchmaking server. Check your internet connection, turn off any VPN or ad/tracker blocker for this site, and try again.",
+      }[e.reason] || `Couldn't connect to room ${code} (${e.reason}).`;
       render();
     });
+  }
+
+  function cancelJoin() {
+    S.joinAttempt = (S.joinAttempt || 0) + 1;
+    if (S.ws) { const t = S.ws; S.ws = null; t.close(); }
+    S.status = null;
+    render();
   }
 
   function startOrJoin(mode, code) {
@@ -136,6 +163,7 @@
   }
 
   function boot() {
+    if (P2P) P2P.onHostStatus(() => renderTopbar());
     render();
     if (!P2P) return connectServer();
     // Coming back to a room link (or reloading): reconnect automatically.
@@ -293,7 +321,8 @@
             </div>
             ${actions}
           </form>
-          ${busy ? `<p class="status-line">${esc(S.status)}</p>` : ''}
+          ${busy ? `<p class="status-line">${esc(S.status)}${S.status.startsWith('Waiting') || S.status.startsWith('Connecting') ? ' <a href="#" id="cancel-join" class="muted">Cancel</a>' : ''}</p>` : ''}
+          ${S.error && !busy ? `<p class="error-line">${esc(S.error)}</p>` : ''}
           ${P2P && !joining ? '<p class="muted" style="font-size:13px;margin:16px 0 0">Creating a room makes this tab the game host. Keep it open while you play.</p>' : ''}
           <div class="game-list"><span>Texas Hold'em</span><span>Spades</span><span>Gin Rummy</span><span>Blackjack</span></div>
         </div>
@@ -321,6 +350,8 @@
     });
     const reopenBtn = document.getElementById('reopen-btn');
     if (reopenBtn) reopenBtn.addEventListener('click', () => { if (getName()) startOrJoin('reopen', mine); });
+    const cancel = document.getElementById('cancel-join');
+    if (cancel) cancel.addEventListener('click', (e) => { e.preventDefault(); cancelJoin(); });
     const own = document.getElementById('start-own');
     if (own) own.addEventListener('click', (e) => {
       e.preventDefault();
@@ -339,7 +370,9 @@
       <span class="room-code" title="Room code">${esc(S.room.code)}</span>
       <button class="btn small" data-a="copy-link">Copy invite link</button>
       <span class="spacer"></span>
-      ${P2P && P2P.isHosting() ? '<span class="tag host" title="Your tab is running this room. If you close it, the game pauses for everyone.">You\'re hosting · keep this tab open</span>' : ''}
+      ${P2P && P2P.isHosting() ? (P2P.hostOnline()
+        ? '<span class="tag host" title="Your tab is running this room. If you close it, the game pauses for everyone.">● Room online · keep this tab open</span>'
+        : '<span class="tag offline" title="New players can\'t find the room until this reconnects. Players already here are unaffected.">● Reconnecting… new players can\'t join yet</span>') : ''}
       <span class="muted" style="font-size:13px"><span class="conn ${S.connected ? '' : 'off'}"></span> ${S.connected ? esc(S.name) : 'Reconnecting…'}</span>
       <button class="btn small ghost" data-a="sound" title="Turn alert sound">${S.sound ? '🔔' : '🔕'}</button>
       <button class="btn small ghost" data-a="leave">Leave</button>`;
