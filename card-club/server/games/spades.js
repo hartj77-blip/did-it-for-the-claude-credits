@@ -47,6 +47,8 @@ function deal(s) {
     tricks: [0, 0, 0, 0],
     trick: [],
     lastTrick: null,
+    played: [], // every card played this round (public, used by bots)
+    voids: [[], [], [], []], // suits each seat has shown out of (public)
     turn: (s.dealer + 1) % 4,
     spadesBroken: false,
     summary: null,
@@ -114,6 +116,11 @@ function act(s, playerId, action, ctx) {
     if (!legalCards(s, seat).includes(card)) throw new Error("You can't play that card");
     if (r.trick.length === 4) { r.lastTrick = r.trick; r.trick = []; }
     removeCard(r.hands[seat], card);
+    r.played.push(card);
+    if (r.trick.length && suitOf(card) !== suitOf(r.trick[0].card)) {
+      const led = suitOf(r.trick[0].card);
+      if (!r.voids[seat].includes(led)) r.voids[seat].push(led);
+    }
     if (suitOf(card) === 'S') r.spadesBroken = true;
     r.trick.push({ seat, card });
 
@@ -199,21 +206,94 @@ function waitingOn(s) {
 }
 
 // --- Bot -----------------------------------------------------------------------
+// Bots remember played cards and who is out of which suit (public information),
+// bid with a trick estimate that includes Nil, and play to the team's situation:
+// make the bid, then avoid bags, cover a partner's Nil, and try to set opponents.
 
-function estimateBid(hand) {
+const SUITS_NS = ['H', 'D', 'C'];
+const bySuit = (cards) => {
+  const out = { S: [], H: [], D: [], C: [] };
+  for (const c of cards) out[suitOf(c)].push(c);
+  for (const k of Object.keys(out)) out[k].sort((a, b) => rankOf(b) - rankOf(a));
+  return out;
+};
+
+function estimateTricks(hand) {
+  const suits = bySuit(hand);
+  const sp = suits.S.map(rankOf);
   let tricks = 0;
-  const bySuit = { S: [], H: [], D: [], C: [] };
-  for (const c of hand) bySuit[suitOf(c)].push(rankOf(c));
-  for (const suit of ['H', 'D', 'C']) {
-    const rs = bySuit[suit];
-    if (rs.includes(14)) tricks += 1;
-    if (rs.includes(13) && rs.length >= 2 && rs.length <= 5) tricks += 0.8;
-    if (rs.length <= 1) tricks += 0.4 * Math.min(2, bySuit.S.length - 2 > 0 ? 1 : 0);
+  let spadeHonors = 0;
+  for (const st of SUITS_NS) {
+    const rs = suits[st].map(rankOf);
+    const n = rs.length;
+    if (rs.includes(14)) tricks += n <= 5 ? 1 : 0.6;
+    if (rs.includes(13)) tricks += n >= 2 && n <= 4 ? 0.8 : n === 5 ? 0.4 : n === 1 ? 0.2 : 0;
+    if (rs.includes(12) && n >= 3 && n <= 4 && (rs.includes(14) || rs.includes(13))) tricks += 0.3;
   }
-  const sp = bySuit.S;
-  for (const r of sp) if (r >= 12) tricks += 0.9;
-  tricks += Math.max(0, sp.length - 3) * 0.8;
-  return Math.max(1, Math.min(13, Math.round(tricks)));
+  if (sp.includes(14)) { tricks += 1; spadeHonors++; }
+  if (sp.includes(13)) { tricks += sp.length >= 2 ? 0.9 : 0.5; spadeHonors++; }
+  if (sp.includes(12)) { tricks += sp.length >= 3 ? 0.7 : 0.3; spadeHonors++; }
+  tricks += Math.max(0, sp.length - 3) * 0.85; // long spades win late tricks
+  // Spare low spades can ruff short side suits.
+  let spare = Math.max(0, Math.min(sp.length - spadeHonors, 3));
+  for (const st of SUITS_NS) {
+    const n = suits[st].length;
+    if (n === 0 && spare > 0) { const use = Math.min(2, spare); tricks += use * 0.75; spare -= use; }
+    else if (n === 1 && spare > 0) { tricks += 0.5; spare -= 1; }
+  }
+  return tricks;
+}
+
+function nilViable(hand) {
+  const suits = bySuit(hand);
+  const sp = suits.S.map(rankOf);
+  if (sp.length > 3 || sp.some((r) => r >= 11)) return false;
+  if (sp.length === 3 && sp[0] >= 9) return false;
+  for (const st of SUITS_NS) {
+    const rs = suits[st].map(rankOf);
+    if (rs.includes(14)) return false;
+    // A king or queen needs enough small cards beneath it to duck under.
+    if (rs.includes(13) && rs.filter((r) => r <= 8).length < 3) return false;
+    if (rs.includes(12) && rs.filter((r) => r <= 8).length < 2) return false;
+    if (rs.length && rs[rs.length - 1] >= 8) return false; // nothing low to duck with
+  }
+  return true;
+}
+
+function chooseBid(s, seat) {
+  const r = s.round;
+  const hand = r.hands[seat];
+  const partnerBid = r.bids[(seat + 2) % 4];
+  const team = seat % 2;
+  const est = estimateTricks(hand);
+  if (partnerBid !== 0 && est < 2.2 && nilViable(hand)) return 0;
+  let bid = Math.round(est - 0.15);
+  if (s.bags[team] >= 7) bid = Math.round(est + 0.3); // bid up to soak up tricks near a bag penalty
+  if (partnerBid !== null && partnerBid > 0) bid = Math.min(bid, 13 - partnerBid);
+  return Math.max(1, Math.min(13, bid));
+}
+
+function teamSituation(s, seat) {
+  const r = s.round;
+  const need = (t) => {
+    let bid = 0;
+    let got = 0;
+    for (const x of [t, t + 2]) if (r.bids[x] !== 0) { bid += r.bids[x]; got += r.tricks[x]; }
+    return bid - got;
+  };
+  const us = seat % 2;
+  return { ourNeed: need(us), theirNeed: need(1 - us), left: r.hands[seat].length };
+}
+
+// Is this card certain to be the highest of its suit still out (ignoring trumps)?
+function isBoss(r, card, hand) {
+  const st = suitOf(card);
+  const rank = rankOf(card);
+  for (let x = rank + 1; x <= 14; x++) {
+    const c = 'xx23456789TJQKA'[x] + st;
+    if (!r.played.includes(c) && !hand.includes(c)) return false;
+  }
+  return true;
 }
 
 function autoAction(s, id) {
@@ -223,37 +303,86 @@ function autoAction(s, id) {
   if (seat !== r.turn) return null;
   const hand = r.hands[seat];
 
-  if (r.phase === 'bidding') return { type: 'bid', bid: estimateBid(hand) };
+  if (r.phase === 'bidding') return { type: 'bid', bid: chooseBid(s, seat) };
   if (r.phase !== 'playing') return null;
 
   const legal = legalCards(s, seat);
+  const play = (card) => ({ type: 'play', card });
   const low = (cards) => cards.reduce((a, c) => (rankOf(c) < rankOf(a) ? c : a));
   const high = (cards) => cards.reduce((a, c) => (rankOf(c) > rankOf(a) ? c : a));
+  const nonSpade = (cards) => { const ns = cards.filter((c) => suitOf(c) !== 'S'); return ns.length ? ns : cards; };
   const trick = r.trick.length === 4 ? [] : r.trick;
+  const partner = (seat + 2) % 4;
+  const iAmNil = r.bids[seat] === 0;
+  const partnerNil = r.bids[partner] === 0 && r.tricks[partner] === 0;
+  const { ourNeed, theirNeed, left } = teamSituation(s, seat);
+  // After making our bid, extra tricks are bags, unless they'd stop the other side making theirs.
+  const settingThem = theirNeed > 0 && theirNeed >= left - 1;
+  const wantTricks = ourNeed > 0 || settingThem;
+  const opponentsVoid = (st) => [1, 3].map((d) => (seat + d) % 4).some((o) => r.voids[o].includes(st));
 
+  // ----- leading -----
   if (trick.length === 0) {
-    const aces = legal.filter((c) => rankOf(c) === 14 && suitOf(c) !== 'S');
-    if (aces.length) return { type: 'play', card: aces[0] };
-    const nonSpade = legal.filter((c) => suitOf(c) !== 'S');
-    return { type: 'play', card: low(nonSpade.length ? nonSpade : legal) };
+    if (iAmNil) return play(low(nonSpade(legal)));
+    const bosses = legal.filter((c) => isBoss(r, c, hand) && (suitOf(c) === 'S' || !opponentsVoid(suitOf(c))));
+    if (partnerNil || wantTricks) {
+      // Cash sure winners; draw out trumps first if we hold most of them.
+      const spBoss = bosses.filter((c) => suitOf(c) === 'S');
+      const mySpades = hand.filter((c) => suitOf(c) === 'S').length;
+      const spadesOut = 13 - r.played.filter((c) => suitOf(c) === 'S').length - mySpades;
+      if (spBoss.length && mySpades > spadesOut) return play(spBoss[0]);
+      const sideBoss = bosses.filter((c) => suitOf(c) !== 'S');
+      if (sideBoss.length) return play(high(sideBoss));
+      // Lead a suit partner can trump but the opponents can't.
+      const ruffable = legal.filter((c) => suitOf(c) !== 'S' && r.voids[partner].includes(suitOf(c)) && !opponentsVoid(suitOf(c)));
+      if (ruffable.length && !partnerNil) return play(low(ruffable));
+      // Otherwise lead low from the shortest side suit to make a void for ruffing.
+      const suits = bySuit(legal);
+      const side = SUITS_NS.filter((st) => suits[st].length).sort((a, b) => suits[a].length - suits[b].length);
+      if (side.length) return play(suits[side[0]][suits[side[0]].length - 1]);
+      return play(low(legal));
+    }
+    // Bid already made: lead low, and avoid leading winners that would add bags.
+    const losers = legal.filter((c) => !isBoss(r, c, hand));
+    return play(low(nonSpade(losers.length ? losers : legal)));
   }
 
+  // ----- following -----
   const winningSeat = trickWinner(trick);
-  const partnerWinning = teamOf(winningSeat) === teamOf(seat);
+  const partnerWinning = winningSeat === partner;
   const canWin = legal.filter((c) => trickWinner(trick.concat({ seat, card: c })) === seat);
-  const nilPartner = r.bids[(seat + 2) % 4] === 0;
-  if (partnerWinning && !nilPartner) {
-    // Don't waste spades on a trick partner already has.
-    const nonSpade = legal.filter((c) => suitOf(c) !== 'S');
-    return { type: 'play', card: low(nonSpade.length ? nonSpade : legal) };
+  const cantWin = legal.filter((c) => !canWin.includes(c));
+  const last = trick.length === 3;
+  const surelyHolds = (c) => last || (isBoss(r, c, hand) && (suitOf(c) === 'S' || !opponentsVoid(suitOf(c))));
+
+  if (iAmNil) return play(cantWin.length ? high(cantWin) : low(legal));
+
+  if (partnerNil) {
+    // Take the trick high (overtaking partner if needed) so partner can duck under it.
+    if (canWin.length) return play(high(canWin));
+    return play(low(nonSpade(legal)));
   }
-  if (r.bids[seat] === 0) {
-    const losers = legal.filter((c) => !canWin.includes(c));
-    return { type: 'play', card: losers.length ? high(losers) : low(legal) };
+
+  if (partnerWinning) {
+    const partnerCard = trick.find((t) => t.seat === partner).card;
+    const partnerSafe = last || isBoss(r, partnerCard, hand);
+    if (!partnerSafe && wantTricks && canWin.length && trick.length === 2) {
+      const safeWin = canWin.filter(surelyHolds);
+      if (safeWin.length) return play(low(safeWin));
+    }
+    // Partner has it: throw something cheap (or shed a high card if we're avoiding bags).
+    if (!wantTricks && cantWin.length) return play(high(nonSpade(cantWin)));
+    return play(low(nonSpade(cantWin.length ? cantWin : legal)));
   }
-  if (canWin.length) return { type: 'play', card: low(canWin) };
-  const nonSpade = legal.filter((c) => suitOf(c) !== 'S');
-  return { type: 'play', card: low(nonSpade.length ? nonSpade : legal) };
+
+  if (wantTricks && canWin.length) {
+    const sure = canWin.filter(surelyHolds);
+    if (sure.length) return play(low(sure));
+    // Not guaranteed: still take it with the cheapest winner, unless that wastes a big spade early.
+    return play(low(canWin));
+  }
+  if (!wantTricks && cantWin.length) return play(high(cantWin)); // shed high cards safely
+  return play(low(nonSpade(cantWin.length ? cantWin : legal)));
 }
 
 // --- View ------------------------------------------------------------------------
