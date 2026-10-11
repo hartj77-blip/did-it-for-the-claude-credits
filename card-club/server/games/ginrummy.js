@@ -143,6 +143,8 @@ function deal(s) {
     discard: [stock.pop()],
     turn: 1 - s.dealer,
     takenFromDiscard: null,
+    known: [[], []], // cards each seat picked up from the discard pile and still holds (public)
+    discardedBy: [[], []], // cards each seat has thrown away (public)
     lastDraw: null,
     result: null,
   };
@@ -172,6 +174,7 @@ function act(s, playerId, action, ctx) {
       if (!r.discard.length) throw new Error('Discard pile is empty');
       card = r.discard.pop();
       r.takenFromDiscard = card;
+      r.known[seat].push(card);
       ctx.log(`${name} takes the ${cardName(card)}`);
     } else {
       card = r.stock.pop();
@@ -202,6 +205,8 @@ function act(s, playerId, action, ctx) {
     }
     removeCard(hand, card);
     r.discard.push(card);
+    r.known[seat] = r.known[seat].filter((c) => c !== card);
+    r.discardedBy[seat].push(card);
     r.takenFromDiscard = null;
     r.lastDraw = null;
 
@@ -295,15 +300,70 @@ function waitingOn(s) {
 }
 
 // --- Bot -----------------------------------------------------------------------
+// Bots weigh three things when choosing a discard: deadwood left, how many unseen
+// cards would still improve the hand ("outs"), and how likely the card is to help
+// the opponent, judged only from what the opponent publicly picked up and threw away.
 
-function bestDiscard(hand, forbidden) {
+const ALL_CARDS = newDeck();
+const sameSuitGap = (a, b) => (suitOf(a) === suitOf(b) ? Math.abs(ginRank(a) - ginRank(b)) : 99);
+
+function unseenCards(r, seat) {
+  const seen = new Set(r.hands[seat].concat(r.discard, r.known[1 - seat]));
+  return ALL_CARDS.filter((c) => !seen.has(c));
+}
+
+// Unseen cards that would join a meld if added to this hand.
+function countOuts(rest, unseen) {
+  let outs = 0;
+  for (const x of unseen) {
+    // Quick filter: x can only meld with a card of the same rank or a nearby same-suit card.
+    if (!rest.some((c) => ginRank(c) === ginRank(x) || sameSuitGap(c, x) <= 2)) continue;
+    if (!bestMelds(rest.concat(x)).deadCards.includes(x)) outs++;
+  }
+  return outs;
+}
+
+// How much would throwing this card help the opponent?
+function danger(r, seat, card) {
+  const opp = 1 - seat;
+  let d = 0;
+  for (const k of r.known[opp]) {
+    if (ginRank(k) === ginRank(card)) d += 2;
+    const gap = sameSuitGap(k, card);
+    if (gap === 1) d += 2;
+    else if (gap === 2) d += 1;
+  }
+  for (const k of r.discardedBy[opp]) {
+    if (ginRank(k) === ginRank(card) || sameSuitGap(k, card) === 1) d -= 0.75; // they passed on these
+  }
+  return Math.max(0, d);
+}
+
+function stage(r) {
+  const n = r.stock.length;
+  return n >= 22 ? 'early' : n >= 12 ? 'mid' : 'late';
+}
+
+function chooseDiscard(r, seat, hand, forbidden) {
+  const unseen = unseenCards(r, seat);
+  const st = stage(r);
+  const wOuts = { early: 1.2, mid: 0.7, late: 0.3 }[st];
+  const wDanger = { early: 1.5, mid: 2.5, late: 4 }[st];
   let best = null;
   for (const c of hand) {
     if (c === forbidden) continue;
-    const dw = bestMelds(hand.filter((x) => x !== c)).deadwood;
-    if (!best || dw < best.dw || (dw === best.dw && value(c) > value(best.card))) best = { card: c, dw };
+    const rest = hand.filter((x) => x !== c);
+    const dw = bestMelds(rest).deadwood;
+    const cost = dw - wOuts * countOuts(rest, unseen) + wDanger * danger(r, seat, c);
+    if (!best || cost < best.cost || (cost === best.cost && value(c) > value(best.card))) best = { card: c, dw, cost };
   }
   return best;
+}
+
+function shouldKnock(r, dw) {
+  if (dw === 0) return true;
+  const limit = { early: 10, mid: 7, late: 4 }[stage(r)];
+  return dw <= limit;
 }
 
 function autoAction(s, id) {
@@ -316,16 +376,26 @@ function autoAction(s, id) {
   if (r.phase === 'draw') {
     const top = r.discard[r.discard.length - 1];
     if (top) {
-      const now = bestMelds(hand).deadwood;
-      const withTop = bestDiscard(hand.concat(top), top);
-      if (withTop && withTop.dw < now - 1) return { type: 'draw', from: 'discard' };
+      const now = bestMelds(hand);
+      const after = bestMelds(hand.concat(top));
+      const melds = !after.deadCards.includes(top);
+      // Take it if it joins a meld or would clearly cut deadwood after the best discard.
+      const withTop = chooseDiscard(r, seat, hand.concat(top), top);
+      if ((melds && withTop.dw <= now.deadwood) || withTop.dw < now.deadwood - 1) return { type: 'draw', from: 'discard' };
     }
     return { type: 'draw', from: 'stock' };
   }
   if (r.phase === 'discard') {
     if (bestMelds(hand).deadwood === 0) return { type: 'knock' };
-    const d = bestDiscard(hand, r.takenFromDiscard);
-    if (d.dw <= 10 && (d.dw <= 4 || r.stock.length < 20)) return { type: 'knock', card: d.card };
+    const d = chooseDiscard(r, seat, hand, r.takenFromDiscard);
+    // Knocking ends the hand, so pick the discard that leaves the least deadwood.
+    let minDw = null;
+    for (const c of hand) {
+      if (c === r.takenFromDiscard) continue;
+      const dw = bestMelds(hand.filter((x) => x !== c)).deadwood;
+      if (!minDw || dw < minDw.dw) minDw = { card: c, dw };
+    }
+    if (shouldKnock(r, minDw.dw)) return { type: 'knock', card: minDw.card };
     return { type: 'discard', card: d.card };
   }
   return null;
