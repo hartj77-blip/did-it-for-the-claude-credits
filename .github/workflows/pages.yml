@@ -8,6 +8,7 @@ on:
     paths:
       - 'card-club/**'
       - 'golf.html'
+      - 'zombies.html'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -36,8 +37,8 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build:web
-      - name: Include the golf game too
-        run: cp ../golf.html dist-web/golf.html
+      - name: Include the golf and zombies games too
+        run: cp ../golf.html ../zombies.html dist-web/
       - uses: actions/upload-pages-artifact@v3
         with:
           path: card-club/dist-web
