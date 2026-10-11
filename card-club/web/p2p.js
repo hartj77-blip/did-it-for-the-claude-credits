@@ -133,7 +133,15 @@
       canCreate: (conn) => conn.isLocal,
     });
 
+    const room = () => rooms.rooms.get(code);
+    const note = (text) => { const r = room(); if (r) { rooms.system(r, text); rooms.touch(r); } };
+
     peer.on('connection', (dc) => {
+      // If the direct connection never opens, tell the host so a silent failure is visible.
+      const watchdog = setTimeout(() => {
+        if (!dc.open) note('Someone tried to join but couldn\'t connect. One of your networks may be blocking it; switching between Wi-Fi and mobile data often helps.');
+      }, 25000);
+      dc.on('open', () => clearTimeout(watchdog));
       const conn = {
         player: null,
         roomCode: null,
@@ -150,11 +158,16 @@
       dc.on('error', gone);
     });
     // Losing the matchmaking server doesn't drop existing players, but new ones
-    // can't find us until we re-register.
-    peer.on('disconnected', () => {
-      setTimeout(() => { if (!peer.destroyed && peer.disconnected) peer.reconnect(); }, 1500);
-    });
-    peer.on('error', (err) => console.warn('PeerJS:', err.type, err.message));
+    // can't find the room until we re-register. Phones drop it whenever the tab is
+    // backgrounded, so also retry as soon as the page is visible again.
+    const reconnect = () => {
+      if (!peer.destroyed && peer.disconnected) { try { peer.reconnect(); } catch {} }
+    };
+    peer.on('disconnected', () => { setStatus(); setTimeout(reconnect, 1500); });
+    peer.on('open', () => setStatus());
+    peer.on('error', (err) => { console.warn('PeerJS:', err.type, err.message); setStatus(); });
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) reconnect(); });
+    const timer = setInterval(() => { if (peer.destroyed) clearInterval(timer); else { reconnect(); setStatus(); } }, 5000);
     window.addEventListener('pagehide', () => rooms.saveNow());
     store.set(LAST_KEY, code);
 
@@ -169,8 +182,19 @@
     };
     t._send = (s) => setTimeout(() => onMessage(conn, s), 0);
     hosting = { peer, rooms, code };
+    setStatus();
     setTimeout(() => t._open(), 0);
     return { transport: t, code, resumed: rooms.rooms.has(code) };
+  }
+
+  // Is the room currently findable by new players?
+  let lastOnline = null;
+  const statusListeners = [];
+  function setStatus() {
+    const online = !!(hosting && !hosting.peer.destroyed && !hosting.peer.disconnected);
+    if (online === lastOnline) return;
+    lastOnline = online;
+    statusListeners.forEach((fn) => fn(online));
   }
 
   function stopHosting() {
@@ -192,10 +216,14 @@
       t._closed(reason);
       try { peer.destroy(); } catch {}
     };
-    const timer = setTimeout(() => fail('unreachable'), 20000);
+    // Stages tell the UI what went wrong: never reached the matchmaking server,
+    // host not registered (room closed / tab asleep), or found but couldn't connect.
+    let stage = 'signaling';
+    const timer = setTimeout(() => fail(stage === 'signaling' ? 'no-signaling' : 'blocked'), 20000);
     t.close = () => fail('closed');
 
     peer.on('open', () => {
+      stage = 'connecting';
       const dc = peer.connect(PREFIX + code, { reliable: true });
       dc.on('open', () => {
         clearTimeout(timer);
@@ -208,7 +236,8 @@
     });
     peer.on('error', (err) => {
       if (err.type === 'peer-unavailable') fail('unreachable');
-      else if (err.type === 'disconnected' || err.type === 'network') { /* signaling hiccup; data channel may be fine */ }
+      else if (stage !== 'signaling' && (err.type === 'disconnected' || err.type === 'network')) { /* signaling hiccup; data channel may be fine */ }
+      else if (stage === 'signaling') fail('no-signaling');
       else fail(friendly(err).message);
     });
     return t;
@@ -226,6 +255,8 @@
     join,
     stopHosting,
     isHosting: () => !!hosting,
+    hostOnline: () => !!lastOnline,
+    onHostStatus: (fn) => statusListeners.push(fn),
     hostingCode: () => (hosting ? hosting.code : null),
     lastHosted: () => {
       const c = store.get(LAST_KEY);
