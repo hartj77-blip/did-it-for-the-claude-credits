@@ -531,7 +531,13 @@
       let status = s.lastAction || '';
       if (!s.inHand) status = s.sittingOut ? 'Sitting out' : s.stack <= 0 ? 'Out of chips' : 'Next hand';
       if (won) status = `<span class="good">Wins ${fmt(won)}</span>`;
-      const bet = s.bet ? `<div class="betchip" style="left:${50 + (x - 50) * 0.55}%;top:${48 + (y - 50) * 0.52}%"><span class="chip ${chipColor(s.bet)}"></span>${fmt(s.bet)}</div>` : '';
+      // Bets sit between the seat and the pot. On a narrow phone table the board spans
+      // almost the full width, so side seats put their bet just below their box instead.
+      const chipHTML = s.bet ? `<span class="chip ${chipColor(s.bet)}"></span>${fmt(s.bet)}` : '';
+      const besideSeat = tall && Math.abs(y - 50) < 20;
+      const bet = s.bet && !besideSeat
+        ? `<div class="betchip" style="left:${50 + (x - 50) * 0.55}%;top:${48 + (y - 50) * 0.52}%">${chipHTML}</div>`
+        : '';
       return `
         ${bet}
         <div class="pseat ${me ? 'me' : ''} ${turn ? 'turn' : ''} ${s.folded ? 'folded' : ''}" style="left:${x}%;top:${y}%">
@@ -543,6 +549,7 @@
             <div class="pact">${status}</div>
             ${handName}
           </div>
+          ${s.bet && besideSeat ? `<div class="betchip inline">${chipHTML}</div>` : ''}
         </div>`;
     }).join('');
 
