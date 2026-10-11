@@ -83,4 +83,85 @@ function describe(score) {
   }
 }
 
-module.exports = { evaluate5, bestHand, compareScores, describe, CATEGORY_NAMES };
+// Fast 7-card evaluator for bot simulations. Cards are ints (rank * 4 + suit,
+// rank 2..14). Returns one number; higher is better. Orders hands exactly like
+// bestHand() but without allocating, which matters when bots run thousands of
+// trial deals per decision on a phone.
+const SUIT_INDEX = { S: 0, H: 1, D: 2, C: 3 };
+const toInt = (c) => rankOf(c) * 4 + SUIT_INDEX[suitOf(c)];
+
+function topStraight(mask) {
+  if (mask & (1 << 14)) mask |= 1 << 1; // ace plays low too
+  for (let hi = 14; hi >= 5; hi--) if (((mask >> (hi - 4)) & 31) === 31) return hi;
+  return 0;
+}
+
+const counts = new Int8Array(15);
+const suitCounts = new Int8Array(4);
+const suitMasks = new Int32Array(4);
+
+function score7(cards, n = cards.length) {
+  counts.fill(0); suitCounts.fill(0); suitMasks.fill(0);
+  let rankMask = 0;
+  for (let i = 0; i < n; i++) {
+    const r = cards[i] >> 2;
+    const st = cards[i] & 3;
+    counts[r]++; suitCounts[st]++;
+    suitMasks[st] |= 1 << r;
+    rankMask |= 1 << r;
+  }
+  const pack = (cat, a = 0, b = 0, c = 0, d = 0, e = 0) => cat * 1048576 + a * 65536 + b * 4096 + c * 256 + d * 16 + e;
+
+  for (let st = 0; st < 4; st++) {
+    if (suitCounts[st] >= 5) {
+      const sf = topStraight(suitMasks[st]);
+      if (sf) return pack(8, sf);
+      const top = [];
+      for (let r = 14; r >= 2 && top.length < 5; r--) if (suitMasks[st] & (1 << r)) top.push(r);
+      // Seven cards can hold a flush and a full house at once; the boat wins.
+      const flushScore = pack(5, ...top);
+      const q = quadsOrBoat(pack);
+      return q > flushScore ? q : flushScore;
+    }
+  }
+  const q = quadsOrBoat(pack);
+  if (q) return q;
+  const st8 = topStraight(rankMask);
+  if (st8) return pack(4, st8);
+
+  let trips = 0;
+  const pairs = [];
+  const singles = [];
+  for (let r = 14; r >= 2; r--) {
+    if (counts[r] === 3 && !trips) trips = r;
+    else if (counts[r] >= 2) pairs.push(r);
+    else if (counts[r] === 1) singles.push(r);
+  }
+  if (trips) return pack(3, trips, singles[0], singles[1]);
+  if (pairs.length >= 2) {
+    const kicker = Math.max(singles[0] || 0, pairs[2] || 0);
+    return pack(2, pairs[0], pairs[1], kicker);
+  }
+  if (pairs.length === 1) return pack(1, pairs[0], singles[0], singles[1], singles[2]);
+  return pack(0, singles[0], singles[1], singles[2], singles[3], singles[4]);
+}
+
+function quadsOrBoat(pack) {
+  let quad = 0;
+  let trip = 0;
+  let pair = 0;
+  for (let r = 14; r >= 2; r--) {
+    if (counts[r] === 4) quad = r;
+    else if (counts[r] === 3) { if (!trip) trip = r; else if (!pair) pair = r; }
+    else if (counts[r] === 2 && !pair) pair = r;
+  }
+  if (quad) {
+    let kicker = 0;
+    for (let r = 14; r >= 2; r--) if (r !== quad && counts[r]) { kicker = r; break; }
+    return pack(7, quad, kicker);
+  }
+  if (trip && pair) return pack(6, trip, pair);
+  return 0;
+}
+
+module.exports = { evaluate5, bestHand, compareScores, describe, CATEGORY_NAMES, score7, toInt };

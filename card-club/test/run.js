@@ -107,6 +107,44 @@ test("hold'em: min raise and turn enforcement", () => {
   holdem.act(s, first, { type: 'raise', amount: 40 }, ctx);
   assert.strictEqual(s.hand.currentBet, 40);
 });
+test("hold'em bots: win estimates match known odds", () => {
+  const avg = (hole, board, opp) => { let t = 0; for (let i = 0; i < 8; i++) t += holdem.estimateEquity(hole, board, opp); return t / 8; };
+  const near = (v, want) => assert(Math.abs(v - want) < 0.04, `got ${v.toFixed(3)}, expected ~${want}`);
+  near(avg(['AS', 'AH'], [], 1), 0.85);
+  near(avg(['7S', '2H'], [], 1), 0.35);
+  near(avg(['AS', 'AH'], [], 3), 0.64);
+});
+test("hold'em bots: never shove a deep stack with a below-average hand", () => {
+  const ids = ['a', 'b', 'c', 'd'];
+  const chips = {};
+  const ctx = makeCtx(chips);
+  const reset = () => ids.forEach((i) => { chips[i] = 1000; });
+  reset();
+  const s = holdem.create(ids.map((id) => ({ id, name: id })), { smallBlind: 10, bigBlind: 20 }, ctx);
+  let hands = 0;
+  let shoves = 0;
+  while (hands < 300) {
+    const w = holdem.waitingOn(s);
+    if (!w.length) {
+      hands++;
+      if (ids.filter((i) => chips[i] > 0).length < 2 || s.hand.phase === 'waiting') reset();
+      holdem.act(s, 'a', { type: 'next' }, ctx);
+      continue;
+    }
+    const h = s.hand;
+    const p = h.players[h.toAct];
+    const opp = h.players.filter((x) => !x.folded).length - 1;
+    const deep = p.stack + p.bet >= 15 * s.options.bigBlind;
+    const a = holdem.autoAction(s, w[0], true, ctx);
+    const before = p.allIn;
+    holdem.act(s, w[0], a, ctx);
+    if (!before && p.allIn && deep && a.type === 'raise') {
+      shoves++;
+      assert(holdem.estimateEquity(p.hole, h.board, opp) > 1 / (opp + 1), 'bot shoved a weak hand');
+    }
+  }
+  assert(shoves < 60, `too many shoves: ${shoves}`);
+});
 test('spades: 40 full games to completion', () => {
   for (let g = 0; g < 40; g++) {
     const ids = ['a', 'b', 'c', 'd'];

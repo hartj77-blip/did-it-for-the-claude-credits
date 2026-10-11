@@ -1,7 +1,7 @@
 // No-limit Texas Hold'em. Stacks come straight from the room's chip bank:
 // read at the start of each hand, settled back when the hand ends.
-const { newDeck, shuffle, rankOf, suitOf } = require('../cards');
-const { bestHand, compareScores, describe } = require('../handeval');
+const { newDeck, shuffle } = require('../cards');
+const { bestHand, compareScores, describe, score7, toInt } = require('../handeval');
 
 const meta = {
   id: 'holdem',
@@ -205,6 +205,9 @@ function act(s, playerId, action, ctx) {
         for (const o of h.players) if (o !== p) o.acted = false;
       }
       h.currentBet = raiseTo;
+      h.raises = (h.raises || 0) + 1;
+      h.raisesTotal = (h.raisesTotal || 0) + 1;
+      p.raisesMade = (p.raisesMade || 0) + 1;
       p.lastAction = p.allIn ? `All-in ${raiseTo}` : wasBet ? `Bet ${raiseTo}` : `Raise to ${raiseTo}`;
       break;
     }
@@ -232,6 +235,7 @@ function endStreet(s, ctx) {
     for (const p of h.players) { p.bet = 0; p.acted = false; }
     h.currentBet = 0;
     h.minRaise = s.options.bigBlind;
+    h.raises = 0;
 
     if (h.street === 'river') return showdown(s, ctx);
     if (h.street === 'preflop') { h.board.push(h.deck.pop(), h.deck.pop(), h.deck.pop()); h.street = 'flop'; }
@@ -351,24 +355,43 @@ function waitingOn(s) {
 }
 
 // --- Bot / auto-play ---------------------------------------------------------
+// Bots estimate their chance of winning by playing out random finishes against
+// the number of opponents still in the hand (using only their own cards and the
+// board, never anyone else's), then weigh that against the price of calling.
 
-function preflopStrength(hole) {
-  const [a, b] = hole.map(rankOf).sort((x, y) => y - x);
-  const suited = suitOf(hole[0]) === suitOf(hole[1]);
-  let v = (a + b) / 28; // 0.14 .. 1
-  if (a === b) v += 0.35 + a / 40;
-  if (suited) v += 0.06;
-  if (a - b === 1) v += 0.04;
-  return Math.min(1, v);
-}
+const EQUITY_TRIALS = 300;
 
-function postflopStrength(hole, board) {
-  const best = bestHand(hole.concat(board)).score;
-  const boardOnly = board.length >= 5 ? bestHand(board).score[0] : -1;
-  let v = [0.15, 0.45, 0.65, 0.75, 0.82, 0.86, 0.92, 0.97, 1][best[0]];
-  if (best[0] === 1) v += (best[1] - 8) / 40; // pair quality
-  if (best[0] <= boardOnly) v -= 0.25; // playing the board
-  return Math.max(0, Math.min(1, v));
+function estimateEquity(hole, board, opponents) {
+  const known = new Set(hole.concat(board));
+  const deck = newDeck().filter((c) => !known.has(c)).map(toInt);
+  const need = opponents * 2 + (5 - board.length);
+  // Slots 0-1: a hand being scored; slots 2-6: the board.
+  const mine = new Int32Array(7);
+  const theirs = new Int32Array(7);
+  mine[0] = toInt(hole[0]);
+  mine[1] = toInt(hole[1]);
+  board.forEach((c, i) => { mine[2 + i] = theirs[2 + i] = toInt(c); });
+  let won = 0;
+  for (let t = 0; t < EQUITY_TRIALS; t++) {
+    // Partial Fisher-Yates: only shuffle the cards this trial needs.
+    for (let i = 0; i < need; i++) {
+      const j = i + Math.floor(Math.random() * (deck.length - i));
+      const tmp = deck[i]; deck[i] = deck[j]; deck[j] = tmp;
+    }
+    for (let i = board.length; i < 5; i++) mine[2 + i] = theirs[2 + i] = deck[opponents * 2 + i - board.length];
+    const myScore = score7(mine);
+    let ties = 0;
+    let lost = false;
+    for (let o = 0; o < opponents && !lost; o++) {
+      theirs[0] = deck[o * 2];
+      theirs[1] = deck[o * 2 + 1];
+      const c = score7(theirs);
+      if (c > myScore) lost = true;
+      else if (c === myScore) ties++;
+    }
+    if (!lost) won += 1 / (ties + 1);
+  }
+  return won / EQUITY_TRIALS;
 }
 
 function autoAction(s, id, isBot) {
@@ -376,22 +399,53 @@ function autoAction(s, id, isBot) {
   const idx = h.toAct;
   const p = h.players[idx];
   if (!p || p.id !== id) return null;
-  const toCall = h.currentBet - p.bet;
+  const toCall = Math.min(h.currentBet - p.bet, p.stack);
   if (!isBot) return toCall > 0 ? { type: 'fold' } : { type: 'check' };
 
-  const strength = h.street === 'preflop' ? preflopStrength(p.hole) : postflopStrength(p.hole, h.board);
+  const opponents = live(h).length - 1;
+  // Equity is measured against random cards, but players who raise usually have
+  // something. Discount it for each raise made by someone else this hand.
+  const othersRaises = (h.raisesTotal || 0) - (p.raisesMade || 0);
+  const raw = estimateEquity(p.hole, h.board, opponents);
+  const equity = raw ** (1 + 0.35 * Math.min(othersRaises, 4)) + (Math.random() - 0.5) * 0.04;
   const pot = h.players.reduce((a, x) => a + x.total, 0);
   const potOdds = toCall / Math.max(1, pot + toCall);
-  const r = Math.random() * 0.15;
-  const x = strength + r;
+  const maxTo = p.bet + p.stack;
+  // Thresholds scale with the field: an average hand wins 1/(n+1) of the time.
+  const fair = 1 / (opponents + 1);
+  const strong = fair + (1 - fair) * 0.25; // worth betting / raising
+  const monster = fair + (1 - fair) * 0.5; // worth re-raising or going all-in
+  const raises = h.raises || 0;
 
-  if (x > 0.85 && p.stack > toCall) {
-    const target = h.currentBet + Math.max(h.minRaise, Math.floor(pot * (0.5 + Math.random() * 0.5)));
-    const raiseTo = Math.min(p.bet + p.stack, target);
-    if (raiseTo > h.currentBet) return { type: 'raise', amount: raiseTo };
+  const raiseTo = (fraction) => {
+    const to = h.currentBet + Math.max(h.minRaise, Math.floor(pot * fraction));
+    // Only commit most of the stack with a monster; otherwise keep it sized.
+    if (to >= maxTo * 0.6) return equity >= monster ? maxTo : null;
+    return to;
+  };
+
+  if (toCall === 0) {
+    if (equity >= strong && raises < 2) {
+      const to = raiseTo(0.5 + Math.random() * 0.25);
+      if (to && to > h.currentBet) return { type: 'raise', amount: to };
+    }
+    // An occasional small bluff when it's checked around after the flop.
+    if (h.street !== 'preflop' && opponents <= 2 && Math.random() < 0.08) {
+      const to = h.currentBet + Math.max(h.minRaise, Math.floor(pot * 0.4));
+      if (to < maxTo * 0.25) return { type: 'raise', amount: to };
+    }
+    return { type: 'check' };
   }
-  if (toCall === 0) return { type: 'check' };
-  if (x > 0.45 + potOdds * 0.6 || (toCall <= s.options.bigBlind && x > 0.4)) return { type: 'call' };
+
+  const cap = equity >= monster ? 4 : 2;
+  if (equity >= (raises === 0 ? strong : monster) && raises < cap && maxTo > h.currentBet) {
+    const to = raiseTo(0.6 + Math.random() * 0.3);
+    if (to && to > h.currentBet) return { type: 'raise', amount: to };
+  }
+  // Big calls (a large share of the stack) need a genuinely good hand.
+  const bigCall = toCall > p.stack * 0.4;
+  if (equity > potOdds + 0.05 && (!bigCall || equity >= strong)) return { type: 'call' };
+  if (h.street === 'preflop' && toCall <= s.options.bigBlind && equity >= fair * 0.85) return { type: 'call' };
   return { type: 'fold' };
 }
 
@@ -456,4 +510,4 @@ function view(s, viewerId, ctx) {
   return out;
 }
 
-module.exports = { meta, create, act, view, waitingOn, autoAction, abort, addPlayer };
+module.exports = { meta, create, act, view, waitingOn, autoAction, abort, addPlayer, estimateEquity };
