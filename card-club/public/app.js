@@ -72,6 +72,7 @@
       S.wantRoom = null;
       history.replaceState(null, '', location.pathname);
       if (msg.kicked) toast('The host removed you from the room');
+      if (P2P) P2P.voiceLeave();
       if (P2P && S.ws) { const t = S.ws; S.ws = null; t.close(); }
       render();
     } else if (msg.t === 'error') {
@@ -164,6 +165,7 @@
 
   function boot() {
     if (P2P) P2P.onHostStatus(() => renderTopbar());
+    if (P2P) P2P.onVoice((v, kind) => { if (kind === 'speaking') applySpeaking(); else renderTopbar(); });
     render();
     if (!P2P) return connectServer();
     // Coming back to a room link (or reloading): reconnect automatically.
@@ -369,6 +371,7 @@
       <div class="logo">Card Club <span class="suits">♠♥♦♣</span></div>
       <span class="room-code" title="Room code">${esc(S.room.code)}</span>
       <button class="btn small" data-a="copy-link">Copy invite link</button>
+      ${voiceBarHTML()}
       <span class="spacer"></span>
       ${P2P && P2P.isHosting() ? (P2P.hostOnline()
         ? '<span class="tag host" title="Your tab is running this room. If you close it, the game pauses for everyone.">● Room online · keep this tab open</span>'
@@ -376,6 +379,36 @@
       <span class="muted" style="font-size:13px"><span class="conn ${S.connected ? '' : 'off'}"></span> ${S.connected ? esc(S.name) : 'Reconnecting…'}</span>
       <button class="btn small ghost" data-a="sound" title="Turn alert sound">${S.sound ? '🔔' : '🔕'}</button>
       <button class="btn small ghost" data-a="leave">Leave</button>`;
+    applySpeaking();
+  }
+
+  // ---------- voice chat (GitHub Pages / peer-to-peer version) ----------
+  const voiceOn = () => !!(P2P && P2P.voiceSupported());
+
+  function voiceBarHTML() {
+    if (!voiceOn()) return '';
+    const v = P2P.voiceState();
+    const chips = v.roster.map((u) => `
+      <span class="vchip" data-voice-id="${u.id}" title="${u.muted ? 'Muted' : 'In voice chat'}">${u.muted ? '🔇' : '🎙'} ${esc(member(u.id).name)}</span>`).join('');
+    if (!v.joined) {
+      return `<span class="voicebar"><button class="btn small primary" data-a="voice-join" title="Talk with everyone in the room">🎙 Join voice</button>${chips}</span>`;
+    }
+    return `
+      <span class="voicebar">
+        <button class="btn small ${v.muted ? 'danger' : ''}" data-a="voice-mute">${v.muted ? '🔇 Unmute' : '🎙 Mute'}</button>
+        <button class="btn small ghost" data-a="voice-leave">Leave voice</button>
+        ${v.blocked ? '<button class="btn small primary" data-a="voice-unlock">🔈 Tap to hear</button>' : ''}
+        ${chips}
+      </span>`;
+  }
+
+  // Light up whoever is talking: their chip, seat and player-list row.
+  function applySpeaking() {
+    if (!voiceOn()) return;
+    const talking = new Set(P2P.voiceState().speaking);
+    document.querySelectorAll('[data-voice-id]').forEach((el) => {
+      el.classList.toggle('speaking', talking.has(el.dataset.voiceId));
+    });
   }
 
   // Don't clobber a field the user is typing in; re-render when they leave it.
@@ -542,7 +575,7 @@
         ${bet}
         <div class="pseat ${me ? 'me' : ''} ${turn ? 'turn' : ''} ${s.folded ? 'folded' : ''}" style="left:${x}%;top:${y}%">
           ${cards}
-          <div class="pbox" style="position:relative">
+          <div class="pbox" style="position:relative" data-voice-id="${s.id}">
             ${s.dealer ? '<span class="dbtn">D</span>' : ''}
             <div class="pname">${member(s.id).isBot ? '🤖 ' : ''}${esc(s.name)}</div>
             <div class="pstack">${fmt(s.stack)}${s.allIn ? ' · ALL IN' : ''}</div>
@@ -630,7 +663,7 @@
       return `
         <div class="tseat s${r}">
           <div class="pseat ${turn ? 'turn' : ''} ${p.id === S.me ? 'me' : ''}" style="position:static;transform:none">
-            <div class="pbox" style="position:relative">
+            <div class="pbox" style="position:relative" data-voice-id="${p.id}">
               ${v.dealer === i ? '<span class="dbtn">D</span>' : ''}
               <div class="pname"><span class="${p.team ? 'team-b' : 'team-a'}">●</span> ${member(p.id).isBot ? '🤖 ' : ''}${esc(p.name)}</div>
               <div class="pstack">Bid ${bid} · Won ${p.tricks}</div>
@@ -704,7 +737,7 @@
     const res = v.result;
 
     const scoreBox = (p, label) => `
-      <div class="team-score">
+      <div class="team-score" data-voice-id="${p.id}">
         <div class="ts-names">${label}${esc(p.name)}</div>
         <div class="ts-num">${p.score}</div>
         <div class="muted" style="font-size:12px">${p.handsWon} hand${p.handsWon === 1 ? '' : 's'} won</div>
@@ -836,7 +869,7 @@
       if (v.phase === 'betting') status = s.bet ? `Bet ${fmt(s.bet)}` : s.skipping ? 'Sitting out' : 'Betting…';
       if (v.phase === 'settled' && s.net !== undefined) status = `<span class="${s.net > 0 ? 'good' : s.net < 0 ? 'bad' : ''}">${s.net === 0 ? 'Even' : signed(s.net)}</span>`;
       return `
-        <div class="bj-seat ${turn ? 'turn' : ''} ${me ? 'me' : ''}">
+        <div class="bj-seat ${turn ? 'turn' : ''} ${me ? 'me' : ''}" data-voice-id="${s.id}">
           <div class="pname" style="font-weight:600">${member(s.id).isBot ? '🤖 ' : ''}${esc(s.name)}</div>
           <div class="pstack" style="color:var(--gold);font-variant-numeric:tabular-nums">${fmt(s.chips)} chips</div>
           ${hands}
@@ -899,6 +932,7 @@
   const RENDER = { holdem: holdemHTML, spades: spadesHTML, ginrummy: ginHTML, blackjack: blackjackHTML };
 
   function afterStage() {
+    applySpeaking();
     seenCards = new Set([...document.querySelectorAll('#stage .card[data-card]')].map((e) => e.dataset.card));
     const range = document.getElementById('raise-range');
     const num = document.getElementById('raise-num');
@@ -939,13 +973,14 @@
         : `<div class="msg"><b>${esc(m.name)}</b> ${esc(m.text)}</div>`)).join('') || '<div class="muted">No messages yet. Say hi!</div>'}</div>`;
       if (atBottom || !body.dataset.scrolled) { body.scrollTop = body.scrollHeight; body.dataset.scrolled = '1'; }
     }
+    applySpeaking();
   }
 
   function playersHTML() {
     const r = S.room;
     const list = r.members.filter((m) => !m.left || m.inGame).slice().sort((a, b) => b.chips - a.chips);
     const items = list.map((m) => `
-      <div class="pitem ${m.left ? 'left' : ''}">
+      <div class="pitem ${m.left ? 'left' : ''}" data-voice-id="${m.id}">
         <span class="conn ${m.connected ? '' : 'off'}" title="${m.connected ? 'Online' : 'Offline'}"></span>
         <span class="name">${m.isBot ? '🤖 ' : ''}${esc(m.name)}${m.id === S.me ? ' <span class="muted">(you)</span>' : ''}</span>
         ${m.id === r.hostId ? '<span class="tag host">host</span>' : ''}
@@ -989,6 +1024,7 @@
 
   // ---------- events ----------
   document.addEventListener('click', (e) => {
+    if (P2P && P2P.voiceSupported() && P2P.voiceState().blocked) P2P.voiceUnlock();
     const el = e.target.closest('[data-a]');
     if (!el || el.disabled) return;
     if (el.dataset.confirm && !confirm(el.dataset.confirm)) return;
@@ -1004,13 +1040,22 @@
         break;
       }
       case 'sound': S.sound = !S.sound; store.set('cc_sound', S.sound ? 'on' : 'off'); renderTopbar(); if (S.sound) beep(); break;
+      case 'voice-join':
+        P2P.voiceJoin(S.me).catch((e) => toast(e.message));
+        break;
+      case 'voice-mute': P2P.voiceMute(!P2P.voiceState().muted); break;
+      case 'voice-leave': P2P.voiceLeave(); break;
+      case 'voice-unlock': P2P.voiceUnlock(); break;
       case 'leave':
         if (P2P && P2P.isHosting()) {
           if (confirm('Close this room? Everyone will be disconnected. You can reopen it later with the same code, and chips and scores are kept.')) {
             P2P.stopHosting();
             location.href = location.pathname;
           }
-        } else if (confirm('Leave this room? Your chips are saved if you come back.')) send({ t: 'leave' });
+        } else if (confirm('Leave this room? Your chips are saved if you come back.')) {
+          if (P2P) P2P.voiceLeave();
+          send({ t: 'leave' });
+        }
         break;
       case 'tab': S.tab = d.tab; renderSide(); if (S.tab === 'chat') document.getElementById('chatinput').focus(); break;
       case 'select-game': send({ t: 'selectGame', game: d.game }); break;
