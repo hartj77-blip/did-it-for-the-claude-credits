@@ -42,7 +42,8 @@ One-time setup:
    push there. You can also run it by hand from the Actions tab.
 
 The site appears at `https://<your-username>.github.io/<repo-name>/`. The golf game is
-included at `/golf.html`.
+included at `/golf.html`, and the Bunker Nine zombies game (solo or 1–4 player co-op with
+voice chat, using the same peer-to-peer rooms) at `/zombies.html`.
 
 Things to know about this mode:
 
