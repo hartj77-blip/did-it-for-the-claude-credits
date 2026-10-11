@@ -22,6 +22,7 @@
     wasMyTurn: false,
     sound: store.get('cc_sound') !== 'off',
     retry: 0,
+    status: null, // connecting/hosting message shown on the landing page
     ui: { raiseTo: null, raiseKey: '', bet: 0, selected: null, pendingStage: false },
   };
   if (S.wantRoom) S.wantRoom = S.wantRoom.toUpperCase();
@@ -33,47 +34,124 @@
   const signed = (n) => `${n > 0 ? '+' : ''}${fmt(n)}`;
 
   // ---------- connection ----------
-  function connect() {
-    const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
-    S.ws = ws;
-    ws.onopen = () => {
+  // Two ways to reach the game engine:
+  //  - server mode: a WebSocket to the Node server that served this page
+  //  - p2p mode (GitHub Pages build): the room creator's tab runs the engine and
+  //    friends connect to it via WebRTC (see web/p2p.js)
+  const P2P = window.CARD_CLUB_MODE === 'p2p' ? window.CardClubP2P : null;
+
+  function attach(t, onWelcome, onClose) {
+    S.ws = t;
+    t.onopen = () => {
       S.connected = true;
       S.retry = 0;
+      S.status = null;
+      renderTopbar();
       send({ t: 'hello', token: S.token, name: S.name || undefined });
     };
-    ws.onmessage = (e) => {
-      const msg = JSON.parse(e.data);
-      if (msg.t === 'welcome') {
-        S.me = msg.id;
-        S.token = msg.token;
-        store.set('cc_token', msg.token);
-        const code = S.room ? S.room.code : S.wantRoom;
-        if (code && S.name) send({ t: 'join', code, name: S.name });
-        else render();
-      } else if (msg.t === 'room') {
-        onRoom(msg.room);
-      } else if (msg.t === 'left') {
-        S.room = null;
-        S.wantRoom = null;
-        history.replaceState(null, '', location.pathname);
-        if (msg.kicked) toast('The host removed you from the room');
-        render();
-      } else if (msg.t === 'error') {
-        toast(msg.msg);
-        if (!S.room && S.wantRoom && /No room/.test(msg.msg)) {
-          S.wantRoom = null;
-          history.replaceState(null, '', location.pathname);
-          render();
-        }
-      }
-    };
-    ws.onclose = () => {
+    t.onmessage = (e) => handleMessage(JSON.parse(e.data), onWelcome);
+    t.onclose = (e) => {
+      if (S.ws !== t) return; // a transport we already replaced
       S.connected = false;
       renderTopbar();
-      const delay = Math.min(10000, 500 * 2 ** S.retry++);
-      setTimeout(connect, delay);
+      onClose(e || {});
     };
   }
+
+  function handleMessage(msg, onWelcome) {
+    if (msg.t === 'welcome') {
+      S.me = msg.id;
+      S.token = msg.token;
+      store.set('cc_token', msg.token);
+      onWelcome();
+    } else if (msg.t === 'room') {
+      onRoom(msg.room);
+    } else if (msg.t === 'left') {
+      S.room = null;
+      S.wantRoom = null;
+      history.replaceState(null, '', location.pathname);
+      if (msg.kicked) toast('The host removed you from the room');
+      if (P2P && S.ws) { const t = S.ws; S.ws = null; t.close(); }
+      render();
+    } else if (msg.t === 'error') {
+      toast(msg.msg);
+      if (!S.room && S.wantRoom && /No room/.test(msg.msg)) {
+        S.wantRoom = null;
+        history.replaceState(null, '', location.pathname);
+        render();
+      }
+    }
+  }
+
+  function connectServer() {
+    const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+    attach(ws, () => {
+      const code = S.room ? S.room.code : S.wantRoom;
+      if (code && S.name) send({ t: 'join', code, name: S.name });
+      else render();
+    }, () => {
+      const delay = Math.min(10000, 500 * 2 ** S.retry++);
+      setTimeout(connectServer, delay);
+    });
+  }
+
+  // P2P: create a new room (code = null) or reopen one this browser hosted before.
+  async function hostRoom(code) {
+    S.status = code ? `Opening room ${code}…` : 'Setting up your room…';
+    render();
+    try {
+      const { transport, code: c, resumed } = await P2P.host(code);
+      attach(transport, () => send(resumed ? { t: 'join', code: c, name: S.name } : { t: 'create', name: S.name }), () => {});
+    } catch (e) {
+      S.status = null;
+      toast(e.message);
+      render();
+    }
+  }
+
+  // P2P: connect to a friend's room. Keeps retrying if we drop out mid-game.
+  function joinRoom(code) {
+    S.wantRoom = code;
+    if (!S.room) { S.status = `Connecting to room ${code}…`; render(); }
+    attach(P2P.join(code), () => send({ t: 'join', code, name: S.name }), (e) => {
+      if (S.room && S.room.code === code) {
+        if (S.retry === 0) toast('Lost connection to the host. Reconnecting…');
+        const delay = Math.min(10000, 1000 * 2 ** S.retry++);
+        setTimeout(() => { if (S.room && S.room.code === code && !S.connected) joinRoom(code); }, delay);
+        return;
+      }
+      S.status = null;
+      toast(e.reason === 'unreachable'
+        ? `Couldn't reach room ${code}. Make sure the host has the room open, then try again.`
+        : `Couldn't connect to room ${code} (${e.reason}).`);
+      render();
+    });
+  }
+
+  function startOrJoin(mode, code) {
+    if (!P2P) return send(mode === 'create' ? { t: 'create', name: S.name } : { t: 'join', code, name: S.name });
+    if (mode === 'create') return hostRoom(null);
+    if (mode === 'reopen') return hostRoom(code);
+    return joinRoom(code);
+  }
+
+  function boot() {
+    render();
+    if (!P2P) return connectServer();
+    // Coming back to a room link (or reloading): reconnect automatically.
+    if (S.wantRoom && S.name) {
+      if (P2P.lastHosted() === S.wantRoom) hostRoom(S.wantRoom);
+      else joinRoom(S.wantRoom);
+    }
+  }
+
+  // Warn the host before closing the tab while friends are connected.
+  window.addEventListener('beforeunload', (e) => {
+    if (P2P && P2P.isHosting() && S.room && S.room.members.some((m) => !m.isBot && m.connected && m.id !== S.me)) {
+      e.preventDefault();
+      e.returnValue = '';
+    }
+  });
 
   function send(obj) {
     if (S.ws && S.ws.readyState === 1) S.ws.send(JSON.stringify(obj));
@@ -184,6 +262,25 @@
   function renderLanding() {
     document.title = 'Card Club';
     const joining = S.wantRoom;
+    const mine = P2P && P2P.lastHosted();
+    const reopening = joining && mine === joining;
+    const busy = !!S.status;
+    const dis = busy ? 'disabled' : '';
+    let actions;
+    if (joining) {
+      actions = `
+        <button class="btn primary big" style="width:100%" type="submit" data-mode="${reopening ? 'reopen' : 'join'}" ${dis}>${reopening ? 'Reopen' : 'Join'} room ${esc(joining)}</button>
+        <div class="or"><a href="#" id="start-own" class="muted">or start your own room</a></div>`;
+    } else {
+      actions = `
+        <button class="btn primary big" style="width:100%" type="submit" data-mode="create" ${dis}>Create a room</button>
+        ${mine ? `<button class="btn" style="width:100%;margin-top:8px" type="button" id="reopen-btn" ${dis}>Reopen your room ${esc(mine)}</button>` : ''}
+        <div class="or">or join with a code</div>
+        <div class="row">
+          <input type="text" id="code" class="code-input" maxlength="4" placeholder="ABCD" autocomplete="off">
+          <button class="btn" type="button" id="join-btn" ${dis}>Join</button>
+        </div>`;
+    }
     $app.innerHTML = `
       <div class="landing">
         <div class="landing-card">
@@ -194,18 +291,10 @@
               <label for="name">Your name</label>
               <input type="text" id="name" maxlength="20" value="${esc(S.name)}" placeholder="e.g. Sam" autocomplete="nickname" required>
             </div>
-            ${joining ? `
-              <button class="btn primary big" style="width:100%" type="submit" data-mode="join">Join room ${esc(joining)}</button>
-              <div class="or"><a href="#" id="start-own" class="muted">or start your own room</a></div>
-            ` : `
-              <button class="btn primary big" style="width:100%" type="submit" data-mode="create">Create a room</button>
-              <div class="or">or join with a code</div>
-              <div class="row">
-                <input type="text" id="code" class="code-input" maxlength="4" placeholder="ABCD" autocomplete="off">
-                <button class="btn" type="button" id="join-btn">Join</button>
-              </div>
-            `}
+            ${actions}
           </form>
+          ${busy ? `<p class="status-line">${esc(S.status)}</p>` : ''}
+          ${P2P && !joining ? '<p class="muted" style="font-size:13px;margin:16px 0 0">Creating a room makes this tab the game host. Keep it open while you play.</p>' : ''}
           <div class="game-list"><span>Texas Hold'em</span><span>Spades</span><span>Gin Rummy</span><span>Blackjack</span></div>
         </div>
       </div>`;
@@ -219,19 +308,19 @@
     };
     document.getElementById('landing-form').addEventListener('submit', (e) => {
       e.preventDefault();
-      const name = getName();
-      if (!name) return;
-      if (joining) send({ t: 'join', code: joining, name });
-      else send({ t: 'create', name });
+      if (!getName()) return;
+      const mode = e.submitter ? e.submitter.dataset.mode : joining ? (reopening ? 'reopen' : 'join') : 'create';
+      startOrJoin(mode, joining);
     });
     const joinBtn = document.getElementById('join-btn');
     if (joinBtn) joinBtn.addEventListener('click', () => {
-      const name = getName();
+      if (!getName()) return;
       const code = document.getElementById('code').value.trim().toUpperCase();
-      if (!name) return;
       if (code.length !== 4) return toast('Room codes are 4 letters');
-      send({ t: 'join', code, name });
+      startOrJoin(code === mine ? 'reopen' : 'join', code);
     });
+    const reopenBtn = document.getElementById('reopen-btn');
+    if (reopenBtn) reopenBtn.addEventListener('click', () => { if (getName()) startOrJoin('reopen', mine); });
     const own = document.getElementById('start-own');
     if (own) own.addEventListener('click', (e) => {
       e.preventDefault();
@@ -250,6 +339,7 @@
       <span class="room-code" title="Room code">${esc(S.room.code)}</span>
       <button class="btn small" data-a="copy-link">Copy invite link</button>
       <span class="spacer"></span>
+      ${P2P && P2P.isHosting() ? '<span class="tag host" title="Your tab is running this room. If you close it, the game pauses for everyone.">You\'re hosting · keep this tab open</span>' : ''}
       <span class="muted" style="font-size:13px"><span class="conn ${S.connected ? '' : 'off'}"></span> ${S.connected ? esc(S.name) : 'Reconnecting…'}</span>
       <button class="btn small ghost" data-a="sound" title="Turn alert sound">${S.sound ? '🔔' : '🔕'}</button>
       <button class="btn small ghost" data-a="leave">Leave</button>`;
@@ -874,7 +964,14 @@
         break;
       }
       case 'sound': S.sound = !S.sound; store.set('cc_sound', S.sound ? 'on' : 'off'); renderTopbar(); if (S.sound) beep(); break;
-      case 'leave': if (confirm('Leave this room? Your chips are saved if you come back.')) send({ t: 'leave' }); break;
+      case 'leave':
+        if (P2P && P2P.isHosting()) {
+          if (confirm('Close this room? Everyone will be disconnected. You can reopen it later with the same code, and chips and scores are kept.')) {
+            P2P.stopHosting();
+            location.href = location.pathname;
+          }
+        } else if (confirm('Leave this room? Your chips are saved if you come back.')) send({ t: 'leave' });
+        break;
       case 'tab': S.tab = d.tab; renderSide(); if (S.tab === 'chat') document.getElementById('chatinput').focus(); break;
       case 'select-game': send({ t: 'selectGame', game: d.game }); break;
       case 'toggle-playing': send({ t: 'togglePlaying', id: d.id }); break;
@@ -946,6 +1043,5 @@
     resizeTimer = setTimeout(() => { if (S.room) renderStage(); }, 150);
   });
 
-  render();
-  connect();
+  boot();
 })();

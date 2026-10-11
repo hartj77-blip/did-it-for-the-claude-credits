@@ -7,6 +7,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 const { Rooms } = require('./rooms');
+const { createHandler } = require('./protocol');
 
 const PORT = Number(process.env.PORT) || 3000;
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -47,7 +48,23 @@ const server = http.createServer((req, res) => {
   });
 });
 
-const rooms = new Rooms({ dataFile: path.join(DATA_DIR, 'rooms.json') });
+const DATA_FILE = path.join(DATA_DIR, 'rooms.json');
+const rooms = new Rooms({
+  storage: {
+    load() {
+      try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); }
+      catch (e) { if (e.code === 'ENOENT') return null; throw e; }
+    },
+    save(data) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+      fs.writeFileSync(DATA_FILE + '.tmp', JSON.stringify(data));
+      fs.renameSync(DATA_FILE + '.tmp', DATA_FILE);
+    },
+  },
+});
+const onMessage = createHandler(rooms, {
+  idFromToken: (token) => 'p_' + crypto.createHash('sha256').update(token).digest('hex').slice(0, 16),
+});
 const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 8 * 1024 });
 
 wss.on('connection', (ws) => {
@@ -55,69 +72,11 @@ wss.on('connection', (ws) => {
   ws.on('pong', () => { ws.isAlive = true; });
   ws.player = null; // { id, name }
   ws.roomCode = null;
-
-  ws.on('message', (raw) => {
-    let msg;
-    try { msg = JSON.parse(raw); } catch { return; }
-    if (!msg || typeof msg.t !== 'string') return;
-    try {
-      handle(ws, msg);
-    } catch (e) {
-      send(ws, { t: 'error', msg: e.message || 'Something went wrong' });
-    }
-  });
-
+  ws.on('message', (raw) => onMessage(ws, raw.toString()));
   ws.on('close', () => {
     if (ws.roomCode) rooms.disconnect(ws.roomCode, ws);
   });
 });
-
-function send(ws, obj) {
-  if (ws.readyState === 1) ws.send(JSON.stringify(obj));
-}
-
-function cleanName(name) {
-  const n = String(name || '').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 20);
-  if (!n) throw new Error('Pick a name first');
-  return n;
-}
-
-function handle(ws, msg) {
-  if (msg.t === 'hello') {
-    const token = typeof msg.token === 'string' && msg.token.length >= 16 ? msg.token.slice(0, 64) : crypto.randomBytes(16).toString('hex');
-    // The token stays secret in the browser; the public id is a hash of it,
-    // so the same browser gets its seat back after a reload or server restart.
-    const id = 'p_' + crypto.createHash('sha256').update(token).digest('hex').slice(0, 16);
-    ws.player = { id, name: msg.name ? cleanName(msg.name) : null };
-    send(ws, { t: 'welcome', id, token });
-    return;
-  }
-  if (!ws.player) throw new Error('Say hello first');
-
-  switch (msg.t) {
-    case 'create': {
-      ws.player.name = cleanName(msg.name || ws.player.name);
-      if (ws.roomCode) rooms.leave(ws.roomCode, ws);
-      const room = rooms.create(ws.player);
-      rooms.join(room.code, ws);
-      return;
-    }
-    case 'join': {
-      ws.player.name = cleanName(msg.name || ws.player.name);
-      const code = String(msg.code || '').toUpperCase().trim();
-      if (ws.roomCode && ws.roomCode !== code) rooms.leave(ws.roomCode, ws);
-      rooms.join(code, ws);
-      return;
-    }
-    case 'leave':
-      if (ws.roomCode) rooms.leave(ws.roomCode, ws);
-      send(ws, { t: 'left' });
-      return;
-    default:
-      if (!ws.roomCode) throw new Error('Join a room first');
-      rooms.command(ws.roomCode, ws, msg);
-  }
-}
 
 // Drop dead connections so players show as disconnected promptly.
 setInterval(() => {

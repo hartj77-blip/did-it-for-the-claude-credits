@@ -1,6 +1,6 @@
 // Rooms: lobby, members, chip bank, scoreboard, and the game currently running.
-const fs = require('fs');
-const path = require('path');
+// Runs in Node (server/index.js) and in the host's browser (GitHub Pages build).
+// Storage is injected so it can be a file or localStorage.
 const crypto = require('crypto');
 
 const GAMES = {
@@ -17,6 +17,10 @@ const AFK_GRACE = 30000; // a disconnected player's turn is auto-played after th
 const ROOM_TTL = 14 * 24 * 3600 * 1000;
 const MAX_CHAT = 100;
 
+function randomCode() {
+  return Array.from({ length: 4 }, () => CODE_CHARS[crypto.randomInt(CODE_CHARS.length)]).join('');
+}
+
 function defaultOptions(game) {
   const o = {};
   for (const opt of game.meta.options) o[opt.key] = opt.default;
@@ -24,19 +28,22 @@ function defaultOptions(game) {
 }
 
 class Rooms {
-  constructor({ dataFile }) {
+  // storage: { load() -> saved data or null, save(data) }
+  constructor({ storage }) {
     this.rooms = new Map();
-    this.dataFile = dataFile;
+    this.storage = storage;
     this.saveTimer = null;
     this.load();
-    setInterval(() => this.cleanup(), 3600 * 1000).unref();
+    const t = setInterval(() => this.cleanup(), 3600 * 1000);
+    if (t.unref) t.unref();
   }
 
   // --- persistence (chips, scores and history survive restarts; live games do not) ---
 
   load() {
     try {
-      const data = JSON.parse(fs.readFileSync(this.dataFile, 'utf8'));
+      const data = this.storage.load();
+      if (!data) return;
       for (const r of data.rooms || []) {
         const room = this.blankRoom(r.code, r.hostId);
         Object.assign(room, {
@@ -57,7 +64,7 @@ class Rooms {
       }
       console.log(`Loaded ${this.rooms.size} room(s)`);
     } catch (e) {
-      if (e.code !== 'ENOENT') console.error('Could not load saved rooms:', e.message);
+      console.error('Could not load saved rooms:', e.message);
     }
   }
 
@@ -85,9 +92,7 @@ class Rooms {
       })),
     };
     try {
-      fs.mkdirSync(path.dirname(this.dataFile), { recursive: true });
-      fs.writeFileSync(this.dataFile + '.tmp', JSON.stringify(data));
-      fs.renameSync(this.dataFile + '.tmp', this.dataFile);
+      this.storage.save(data);
     } catch (e) {
       console.error('Could not save rooms:', e.message);
     }
@@ -125,11 +130,12 @@ class Rooms {
     };
   }
 
-  create(player) {
-    let code;
-    do {
-      code = Array.from({ length: 4 }, () => CODE_CHARS[crypto.randomInt(CODE_CHARS.length)]).join('');
-    } while (this.rooms.has(code));
+  create(player, fixedCode) {
+    let code = fixedCode;
+    while (!code || this.rooms.has(code)) {
+      if (fixedCode) throw new Error(`Room ${fixedCode} already exists`);
+      code = randomCode();
+    }
     const room = this.blankRoom(code, player.id);
     this.rooms.set(code, room);
     return room;
@@ -574,4 +580,4 @@ class Rooms {
   }
 }
 
-module.exports = { Rooms, GAMES };
+module.exports = { Rooms, GAMES, randomCode };

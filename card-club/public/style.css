@@ -65,6 +65,7 @@ input:focus { border-color: var(--gold); }
 .field label { font-size: 13px; color: var(--muted); }
 .or { text-align: center; color: var(--muted); font-size: 13px; margin: 14px 0; }
 .code-input { text-transform: uppercase; letter-spacing: 6px; font-weight: 700; text-align: center; flex: 1; }
+.status-line { text-align: center; color: var(--gold); margin: 14px 0 0; font-size: 14px; }
 .game-list { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 22px; justify-content: center; }
 .game-list span { font-size: 12px; padding: 4px 9px; border-radius: 99px; background: var(--panel-2); color: var(--muted); }
 
