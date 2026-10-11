@@ -78,6 +78,9 @@ input:focus { border-color: var(--gold); }
 .topbar .logo .suits { font-size: 15px; }
 .room-code { font-weight: 700; letter-spacing: 3px; background: #0a1611; padding: 5px 10px; border-radius: 8px; border: 1px solid var(--line); }
 .topbar .spacer { flex: 1; }
+.voicebar { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.vchip { font-size: 12px; padding: 4px 9px; border-radius: 99px; background: var(--panel-2); border: 1px solid var(--line); white-space: nowrap; transition: box-shadow .12s, border-color .12s; }
+.speaking { border-color: var(--good) !important; box-shadow: 0 0 0 2px var(--good), 0 0 14px rgba(95, 208, 138, .55) !important; }
 .conn { width: 8px; height: 8px; border-radius: 50%; background: var(--good); display: inline-block; }
 .conn.off { background: var(--bad); }
 .stage { overflow: auto; position: relative; background: radial-gradient(ellipse at 50% 40%, #16402d, var(--bg) 75%); }
@@ -220,6 +223,7 @@ input:focus { border-color: var(--gold); }
 .pseat.me .pbox { background: rgba(30, 50, 40, .95); }
 .dbtn { position: absolute; right: -10px; top: -8px; width: 22px; height: 22px; border-radius: 50%; background: #fff; color: #111; font-size: 11px; font-weight: 800; display: grid; place-items: center; box-shadow: 0 1px 3px rgba(0,0,0,.5); }
 .betchip { position: absolute; transform: translate(-50%, -50%); display: flex; align-items: center; gap: 4px; font-weight: 700; font-size: 13px; font-variant-numeric: tabular-nums; z-index: 1; }
+.betchip.inline { position: static; transform: none; }
 .chip { width: 18px; height: 18px; border-radius: 50%; background: var(--red); border: 3px dashed #fff; box-shadow: 0 1px 3px rgba(0,0,0,.5); display: inline-block; }
 .chip.blue { background: #2f6fb3; } .chip.black { background: #222; } .chip.green { background: #2c8a4f; } .chip.gold { background: #c9a227; }
 
