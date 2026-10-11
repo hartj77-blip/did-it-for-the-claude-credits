@@ -75,7 +75,7 @@ button:focus-visible{outline:2px solid var(--flag);outline-offset:2px}
 .keys{position:absolute;font-size:12px;color:var(--chalk);opacity:.75;text-shadow:0 1px 3px rgba(0,0,0,.7);white-space:nowrap}
 
 /* swing meter */
-.meter{position:absolute;left:50%;transform:translateX(-50%);width:min(520px,calc(100vw - 32px));pointer-events:auto;touch-action:none;cursor:pointer}
+.meter{position:absolute;left:50%;transform:translateX(-50%);width:min(520px,calc(100vw - 680px));pointer-events:auto;touch-action:none;cursor:pointer}
 .meter[hidden]{display:none!important}
 .meter-top{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:6px;text-shadow:0 1px 4px rgba(0,0,0,.75)}
 #mLabel{font-size:15px;font-weight:600}
@@ -303,6 +303,7 @@ table.sc{border-collapse:collapse;width:100%;font-size:16px;min-width:440px}
     </div>
     <div class="row-btns">
       <button class="primary" id="btnStart">Tee off</button>
+      <button class="ghost" id="btnNew" hidden>New round</button>
       <span class="best" id="bestLine"></span>
     </div>
   </div>
@@ -540,7 +541,7 @@ function simulate(H,o){
   }
   if(result.type==='holed'){const gy=H.height(cup.x,cup.z)+BALL_R;frames.push(cup.x,gy,cup.z);for(let i=1;i<=9;i++)frames.push(cup.x,gy-i*.011,cup.z);x=cup.x;z=cup.z;y=gy-.1;}
   else frames.push(x,y,z);
-  return{frames,landIdx,carryPos,apex,result,rest:{x,y,z},descent,firstSurf,time:t};
+  return{frames,landIdx,carryPos,apex,result,rest:{x,y,z},descent,firstSurf,time:t,lipped};
 }
 
 /* ---------- renderer & scene ---------- */
@@ -718,9 +719,15 @@ const sfx={ctx:null,on:true,noise:null,
   land(){this.burst(260,.8,.25,.12,'lowpass');},
   cup(){this.tone(1500,1200,.2,.05);this.tone(1100,900,.18,.05,.07);this.tone(800,700,.16,.08,.15);},
   splash(){this.burst(900,.6,.6,.7,'lowpass');},
+  swell(freq,q,gain,attack,hold,decay,delay){const c=this.ctx;if(!c||!this.on)return;const t=c.currentTime+(delay||0),s=c.createBufferSource();s.buffer=this.noise;s.loop=true;const f=c.createBiquadFilter();f.type='bandpass';f.frequency.value=freq;f.Q.value=q;const g=c.createGain();
+    g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(gain,t+attack);g.gain.setValueAtTime(gain,t+attack+hold);g.gain.exponentialRampToValueAtTime(.0001,t+attack+hold+decay);s.connect(f).connect(g).connect(c.destination);s.start(t);s.stop(t+attack+hold+decay+.1);},
+  cheer(k){this.swell(1100,.7,.22*k,.35,.6+k,1.4);this.swell(2600,1.2,.08*k,.3,.5+k,1.2);for(let i=0;i<Math.round(14*k);i++)this.clap(.15+Math.random()*(1.2+k));},
+  clap(delay){const c=this.ctx;if(!c||!this.on)return;const t=c.currentTime+delay,s=c.createBufferSource();s.buffer=this.noise;const f=c.createBiquadFilter();f.type='bandpass';f.frequency.value=1400+Math.random()*900;f.Q.value=1.5;const g=c.createGain();g.gain.setValueAtTime(.12,t);g.gain.exponentialRampToValueAtTime(.001,t+.06);s.connect(f).connect(g).connect(c.destination);s.start(t,Math.random()*.5);s.stop(t+.08);},
+  groan(){this.swell(420,.9,.16,.15,.35,.9);this.tone(260,150,.07,1.1);},
   tree(){this.burst(2400,.5,.3,.25,'highpass');}
 };
 
+function buzz(p){try{if(navigator.vibrate)navigator.vibrate(p);}catch(e){}}
 /* ---------- game state ---------- */
 const game={state:'intro',holeIdx:0,scores:[],H:null,ball:{x:0,y:0,z:0},lie:TEE,strokes:0,club:0,yaw:0,shape:0,
   wind:{x:0,z:0,mph:0,yaw:0},power:0,powerDir:1,locked:0,needle:0,pred:null,predKey:'',shot:null,view:false,puttMax:5,timer:0,fly:0,lastShot:null};
@@ -802,8 +809,9 @@ function refreshPrediction(power){
   const key=game.club+'|'+game.shape+'|'+game.yaw.toFixed(4)+'|'+power.toFixed(3)+'|'+b.x.toFixed(2)+b.z.toFixed(2);
   if(key===game.predKey)return;game.predKey=key;
   if(c.putt){
-    const len=power>0?game.puttFull*power*(game.puttReal/game.puttDist):game.puttReal,pts=[],dx=Math.sin(game.yaw),dz=Math.cos(game.yaw),n=Math.max(2,Math.ceil(len/.25));
-    for(let i=0;i<=n;i++){const d=len*i/n,x=b.x+dx*d,z=b.z+dz*d;pts.push(x,H.height(x,z)+.02,z);}
+    const pw=power>0?power:clamp(game.puttDist/game.puttFull,0,1),L=launchParams(pw,0);
+    const r=simulate(H,Object.assign({},L,{x:b.x,y:b.y,z:b.z,noTrees:true})),f=r.frames,n=f.length/3,show=Math.max(2,Math.floor(n*.55)),pts=[];
+    for(let i=0;i<show;i+=2)pts.push(f[i*3],H.height(f[i*3],f[i*3+2])+.02,f[i*3+2]);
     game.puttPts=pts;game.pred=null;ring.visible=false;predArc.mesh.visible=false;return;
   }
   game.puttPts=null;
@@ -852,7 +860,7 @@ function executeShot(power,acc){
   game.shot={sim,t:0,mul:1,start:{x:b.x,y:b.y,z:b.z},yaw:game.yaw,isPutt:!!L.putt,L,club:c,shown:0,landed:false};
   ring.visible=false;predArc.mesh.visible=false;puttLine.mesh.visible=false;clearSlopes();tracer.mesh.visible=false;
   game.view=false;$('btnView').setAttribute('aria-pressed','false');
-  sfx.hit(power,!!L.putt);game.state='flight';hud();
+  sfx.hit(power,!!L.putt);buzz(L.putt?8:18);game.state='flight';game.shot.lie=game.lie;hud();
   const carryD=sim.carryPos?hdist(b,sim.carryPos):0;game.shot.long=!L.putt&&carryD>45;game.shot.camCut=false;
 }
 function finishShot(){
@@ -862,11 +870,10 @@ function finishShot(){
   const stats={speed:s.L.speed*MS2MPH,launch:s.L.launch,spin:s.L.rpm,apex:(sim.apex-st.y)*M2FT,carry:sim.carryPos?hdist(st,sim.carryPos)*M2YD:null,total,off,desc:sim.descent*180/Math.PI,putt:s.isPutt};
   let result='';
   if(res.type==='holed'){
-    sfx.cup();game.ball={x:H.cup.x,y:H.height(H.cup.x,H.cup.z),z:H.cup.z};
-    const name=scoreName(game.strokes,H.par),d=game.strokes-H.par;game.scores[game.holeIdx]=game.strokes;
-    result='Holed';showMonitor(stats,result);
-    banner(name,game.strokes===1?'Ace on '+H.name:(game.strokes+' strokes · '+(d===0?'level':(d>0?'+'+d:d))+' on the hole'),2600,d<0?'gold':'');
-    game.state='holed';game.timer=2.8;hud();save();return;
+    const from=hdist(st,H.cup);let how='';
+    if(!s.isPutt&&game.strokes>1)how=from*M2YD>=20?'Holed out from '+Math.round(from*M2YD)+' yds':'Chip-in';
+    else if(s.isPutt&&from>=6)how='Drained it from '+Math.round(from*M2FT)+' ft';
+    holeOut(stats,how);return;
   }
   if(res.type==='water'){
     sfx.splash();game.strokes++;
@@ -880,11 +887,25 @@ function finishShot(){
   }else{
     game.ball={x:rest.x,z:rest.z,y:0};const lie=H.surface(rest.x,rest.z),dp=hdist(rest,H.cup);
     result=SURF[lie].name+' · '+(dp<27?Math.round(dp*M2FT)+' ft':Math.round(dp*M2YD)+' yds')+' left';
-    if(s.isPutt&&dp<.9&&dp>0){}
+    if((lie===GREEN||lie===FRINGE)&&dp<.61&&game.strokes<9){game.strokes++;stats.gimme=true;holeOut(stats,'Gimme, tapped in from '+Math.max(1,Math.round(dp*M2FT*12))+' in');return;}
+    const yds=Math.round(total*M2YD);
+    if(sim.lipped&&s.isPutt){banner('Lip out!',Math.round(dp*M2FT)+' ft coming back',1800,'bad');sfx.groan();}
+    else if(!s.isPutt&&(lie===GREEN||lie===FRINGE)&&dp<3.05&&hdist(st,H.cup)>25){banner('Stuck it!',Math.round(dp*M2FT)+' ft from the pin',2000,'gold');sfx.cheer(.6);buzz([20,40,20]);}
+    else if(s.lie===TEE&&!s.isPutt&&yds>=275&&lie===FAIRWAY){banner('Bomb!',yds+' yds down the fairway',2000,'gold');sfx.cheer(.45);}
   }
   showMonitor(stats,result);
   if(game.strokes>=10){game.scores[game.holeIdx]=10;banner('Picked up','Ten strokes is the maximum on this hole.',2200,'bad');game.state='holed';game.timer=2.4;hud();save();return;}
   game.lastShot=s;game.state='result';game.timer=res.type==='rest'?1.3:2.2;hud();
+}
+function holeOut(stats,how){
+  const H=game.H;sfx.cup();game.ball={x:H.cup.x,y:H.height(H.cup.x,H.cup.z),z:H.cup.z};
+  const name=scoreName(game.strokes,H.par),d=game.strokes-H.par;game.scores[game.holeIdx]=game.strokes;
+  showMonitor(stats,'Holed');
+  const tally=game.strokes===1?'Ace on '+H.name:(game.strokes+' strokes · '+(d===0?'level':(d>0?'+'+d:d))+' on the hole');
+  banner(name,how?how+' · '+tally:tally,2800,d<0?'gold':'');
+  if(d<0)sfx.cheer(d<-1?1.4:1);else if(how&&!stats.gimme)sfx.cheer(.7);
+  buzz(d<0?[40,60,40,60,80]:[30]);
+  game.state='holed';game.timer=2.9;hud();save();
 }
 function scoreName(n,par){if(n===1)return'Hole in one';const d=n-par;return({'-3':'Albatross','-2':'Eagle','-1':'Birdie','0':'Par','1':'Bogey','2':'Double bogey','3':'Triple bogey'})[d]||('+'+d);}
 function relPar(){let s=0;game.scores.forEach((v,i)=>{if(v)s+=v-HOLES[i].par;});return s===0?'E':(s>0?'+'+s:'−'+(-s));}
@@ -1052,12 +1073,16 @@ function showCard(mode){
 function cardNext(){
   const el=$('cardOverlay'),mode=el.dataset.mode;el.hidden=true;
   if(mode==='peek'){game.state=game.prevState||'aim';return;}
-  if(mode==='final'){game.scores=[];loadHole(0);return;}
+  if(mode==='final'){game.scores=[];clearSave();loadHole(0);return;}
   loadHole(game.holeIdx+1);
 }
 function readBest(){try{return+localStorage.getItem('harrowPinesBest')||0;}catch(e){return 0;}}
 function writeBest(v){try{localStorage.setItem('harrowPinesBest',String(v));}catch(e){}}
-function save(){}
+const SAVE_KEY='harrowPinesRound';
+function save(){try{const done=HOLES.every((h,i)=>game.scores[i]);if(done){localStorage.removeItem(SAVE_KEY);return;}
+  localStorage.setItem(SAVE_KEY,JSON.stringify({scores:game.scores,next:game.holeIdx+1}));}catch(e){}}
+function readSave(){try{const v=JSON.parse(localStorage.getItem(SAVE_KEY)||'null');if(v&&Array.isArray(v.scores)&&v.next>0&&v.next<HOLES.length)return v;}catch(e){}return null;}
+function clearSave(){try{localStorage.removeItem(SAVE_KEY);}catch(e){}}
 
 /* ---------- input ---------- */
 const keys={},hold={left:false,right:false};
@@ -1177,10 +1202,13 @@ canvas.addEventListener('pointermove',e=>{if(!drag||game.state!=='aim')return;co
 
 function startGame(){
   sfx.init();$('intro').hidden=true;$('hud').hidden=false;
+  if(resumeData){game.scores=resumeData.scores;const n=resumeData.next;resumeData=null;loadHole(n);return;}
   if(game.H&&game.holeIdx===0&&game.strokes===0){game.state='flyover';game.fly=0;banner('Hole 1',game.H.name+' · Par '+game.H.par+' · '+Math.round(game.H.total*M2YD)+' yds',3200);}
   else loadHole(game.holeIdx);
 }
+let resumeData=null;
 $('btnStart').onclick=startGame;
+$('btnNew').onclick=()=>{resumeData=null;clearSave();startGame();};
 
 function resize(){const w=innerWidth,h=innerHeight;renderer.setSize(w,h,false);camera.aspect=w/h;camera.fov=w<h?64:52;camera.updateProjectionMatrix();if(game.H&&miniBase&&holeScene){}}
 addEventListener('resize',resize);resize();
@@ -1192,8 +1220,12 @@ addEventListener('resize',resize);resize();
   const wr=Math.random();game.wind.mph=Math.round(wr*wr*14);game.wind.yaw=Math.random()*TAU;const ws=game.wind.mph/MS2MPH;game.wind.x=Math.sin(game.wind.yaw)*ws;game.wind.z=Math.cos(game.wind.yaw)*ws;
   game.ball={x:0,z:0,y:H.height(0,0)+BALL_R};prepareShot(true);game.state='intro';
   wantPos.set(0,H.teeE+10,-28);const p=H.pointAt(140);wantLook.set(p.x,H.height(p.x,p.z)+4,p.z);snapCam();
+  resumeData=readSave();
+  if(resumeData){const played=resumeData.scores.filter(Boolean).length;let rel=0;resumeData.scores.forEach((v,i)=>{if(v)rel+=v-HOLES[i].par;});
+    $('btnStart').textContent='Resume at hole '+(resumeData.next+1);$('btnNew').hidden=false;
+    $('bestLine').textContent=played+' hole'+(played===1?'':'s')+' played, '+(rel===0?'E':(rel>0?'+'+rel:'−'+(-rel)));}
   requestAnimationFrame(frame);
 })();
-window.__golf={game,simulate,CLUBS,HOLES,buildHole,launchParams,paintCourse,buildScene,prepareShot,executeShot,onClubChange};
+window.__golf={holeOut,readSave,game,simulate,CLUBS,HOLES,buildHole,launchParams,paintCourse,buildScene,prepareShot,executeShot,onClubChange};
 })();
 </script>
