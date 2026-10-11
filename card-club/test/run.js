@@ -6,6 +6,7 @@ const holdem = require('../server/games/holdem');
 const spades = require('../server/games/spades');
 const gin = require('../server/games/ginrummy');
 const blackjack = require('../server/games/blackjack');
+const { newDeck } = require('../server/cards');
 
 let passed = 0;
 function test(name, fn) {
@@ -107,6 +108,44 @@ test("hold'em: min raise and turn enforcement", () => {
   holdem.act(s, first, { type: 'raise', amount: 40 }, ctx);
   assert.strictEqual(s.hand.currentBet, 40);
 });
+test("hold'em bots: win estimates match known odds", () => {
+  const avg = (hole, board, opp) => { let t = 0; for (let i = 0; i < 8; i++) t += holdem.estimateEquity(hole, board, opp); return t / 8; };
+  const near = (v, want) => assert(Math.abs(v - want) < 0.04, `got ${v.toFixed(3)}, expected ~${want}`);
+  near(avg(['AS', 'AH'], [], 1), 0.85);
+  near(avg(['7S', '2H'], [], 1), 0.35);
+  near(avg(['AS', 'AH'], [], 3), 0.64);
+});
+test("hold'em bots: never shove a deep stack with a below-average hand", () => {
+  const ids = ['a', 'b', 'c', 'd'];
+  const chips = {};
+  const ctx = makeCtx(chips);
+  const reset = () => ids.forEach((i) => { chips[i] = 1000; });
+  reset();
+  const s = holdem.create(ids.map((id) => ({ id, name: id })), { smallBlind: 10, bigBlind: 20 }, ctx);
+  let hands = 0;
+  let shoves = 0;
+  while (hands < 300) {
+    const w = holdem.waitingOn(s);
+    if (!w.length) {
+      hands++;
+      if (ids.filter((i) => chips[i] > 0).length < 2 || s.hand.phase === 'waiting') reset();
+      holdem.act(s, 'a', { type: 'next' }, ctx);
+      continue;
+    }
+    const h = s.hand;
+    const p = h.players[h.toAct];
+    const opp = h.players.filter((x) => !x.folded).length - 1;
+    const deep = p.stack + p.bet >= 15 * s.options.bigBlind;
+    const a = holdem.autoAction(s, w[0], true, ctx);
+    const before = p.allIn;
+    holdem.act(s, w[0], a, ctx);
+    if (!before && p.allIn && deep && a.type === 'raise') {
+      shoves++;
+      assert(holdem.estimateEquity(p.hole, h.board, opp) > 1 / (opp + 1), 'bot shoved a weak hand');
+    }
+  }
+  assert(shoves < 60, `too many shoves: ${shoves}`);
+});
 test('spades: 40 full games to completion', () => {
   for (let g = 0; g < 40; g++) {
     const ids = ['a', 'b', 'c', 'd'];
@@ -131,6 +170,47 @@ test('spades: must follow suit and cannot lead unbroken spades', () => {
   assert.deepStrictEqual(spades.legalCards(s, 0), ['2H']);
   spades.act(s, 'a', { type: 'play', card: '2H' }, ctx);
   assert.throws(() => spades.act(s, 'b', { type: 'play', card: 'KS' }, ctx), /can't play/);
+});
+test('spades bots: bid Nil only with a hand that can duck', () => {
+  const ctx = makeCtx({});
+  const s = spades.create(['a', 'b', 'c', 'd'].map((id) => ({ id, name: id })), { target: 500 }, ctx);
+  s.round.turn = 0;
+  s.round.hands[0] = ['2S', '5S', '2H', '4H', '6H', '7H', '3D', '5D', '6D', '2C', '3C', '4C', '7C'];
+  assert.strictEqual(spades.autoAction(s, 'a').bid, 0, 'weak low hand should bid Nil');
+  s.round.hands[0] = ['AS', 'KS', 'QS', '9S', 'AH', 'KH', '4H', 'AD', '5D', '6D', '2C', '3C', '4C'];
+  assert(spades.autoAction(s, 'a').bid >= 5, 'strong hand should bid high');
+});
+test('spades bots: shed winners instead of taking bags once the bid is made', () => {
+  const ctx = makeCtx({});
+  const s = spades.create(['a', 'b', 'c', 'd'].map((id) => ({ id, name: id })), { target: 500 }, ctx);
+  const r = s.round;
+  r.phase = 'playing';
+  r.bids = [2, 3, 2, 3];
+  r.tricks = [3, 4, 1, 1]; // we've made our 4; they have 5 of 6, so there's no setting them
+  r.hands = [['KH', '3H', '4D', '5C'], ['2H', '6D', '7C', '8C'], ['QH', '9D', '9C', 'TC'], ['5H', 'TD', 'JC', 'QC']];
+  r.trick = [{ seat: 3, card: '5H' }];
+  r.turn = 0;
+  r.played = [];
+  // Opponents' 5H leads; KH would win (a bag). Expect the bot to duck with 3H.
+  assert.strictEqual(spades.autoAction(s, 'a').card, '3H');
+});
+test('gin bots: avoid discarding a card the opponent is collecting', () => {
+  const ctx = makeCtx({});
+  const s = gin.create([{ id: 'a', name: 'a' }, { id: 'b', name: 'b' }], { target: 100 }, ctx);
+  const r = s.round;
+  r.turn = 0;
+  r.phase = 'discard';
+  r.takenFromDiscard = null;
+  r.hands[0] = ['AS', '2S', '3S', '4D', '5D', '6D', 'JC', 'JD', 'JH', '9H', '8C'];
+  r.known[1] = ['TH']; // opponent picked up the 10 of hearts, so the 9 of hearts would help them
+  // Rebuild the rest of the deal around this hand so no card appears twice.
+  const rest = newDeck().filter((c) => !r.hands[0].includes(c) && c !== 'TH' && c !== 'KS');
+  r.hands[1] = ['TH'].concat(rest.slice(0, 9));
+  r.discard = ['KS'];
+  r.stock = rest.slice(9, 24); // 15 left: mid-hand
+  const a = gin.autoAction(s, 'a');
+  assert.strictEqual(a.type, 'discard');
+  assert.strictEqual(a.card, '8C', 'should keep the 9H away from the opponent even though it scores 1 more');
 });
 test('gin rummy: 60 full games to completion', () => {
   for (let g = 0; g < 60; g++) {
