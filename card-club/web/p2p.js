@@ -93,6 +93,258 @@
     return new Error(map[err.type] || err.message || 'Connection failed');
   }
 
+
+  // ---------- voice chat ----------
+  // Audio is routed through the host's tab: each player sends their mic to the host,
+  // and the host forwards every other player's audio back out. Only host<->player
+  // connections are used, the same ones the game already relies on (players never
+  // need a direct connection to each other, which some networks block).
+  const voice = {
+    joined: false,
+    muted: false,
+    local: null, // our mic MediaStream
+    myId: null,
+    roster: [], // [{ id, muted }] from the host
+    speaking: new Set(),
+    remotes: new Map(), // player id -> { audio, meter }
+    listeners: [],
+    blocked: false, // browser refused to autoplay audio until the next tap
+  };
+  const voiceState = () => ({
+    joined: voice.joined,
+    muted: voice.muted,
+    roster: voice.roster,
+    speaking: [...voice.speaking],
+    blocked: voice.blocked,
+  });
+  const emitVoice = (kind = 'change') => voice.listeners.forEach((fn) => fn(voiceState(), kind));
+
+  let audioCtx = null;
+  const meters = new Map(); // id -> { analyser, buf, source, lastLoud }
+  let meterTimer = null;
+  function addMeter(id, stream) {
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 512;
+      source.connect(analyser);
+      meters.set(id, { analyser, source, buf: new Uint8Array(analyser.fftSize), lastLoud: 0 });
+    } catch {}
+    if (!meterTimer) meterTimer = setInterval(pollMeters, 150);
+  }
+  function removeMeter(id) {
+    const m = meters.get(id);
+    if (m) { try { m.source.disconnect(); } catch {} meters.delete(id); }
+    if (voice.speaking.delete(id)) emitVoice('speaking');
+    if (!meters.size && meterTimer) { clearInterval(meterTimer); meterTimer = null; }
+  }
+  function pollMeters() {
+    const now = Date.now();
+    let changed = false;
+    for (const [id, m] of meters) {
+      m.analyser.getByteTimeDomainData(m.buf);
+      let sum = 0;
+      for (const v of m.buf) sum += (v - 128) * (v - 128);
+      const rms = Math.sqrt(sum / m.buf.length) / 128;
+      const mutedSelf = id === voice.myId && voice.muted;
+      if (rms > 0.03 && !mutedSelf) m.lastLoud = now;
+      const talking = now - m.lastLoud < 350;
+      if (talking !== voice.speaking.has(id)) {
+        if (talking) voice.speaking.add(id); else voice.speaking.delete(id);
+        changed = true;
+      }
+    }
+    if (changed) emitVoice('speaking');
+  }
+
+  function playRemote(id, stream) {
+    removeRemote(id);
+    const audio = document.createElement('audio');
+    audio.autoplay = true;
+    audio.setAttribute('playsinline', '');
+    audio.srcObject = stream;
+    audio.style.display = 'none';
+    document.body.appendChild(audio);
+    audio.play().catch(() => { voice.blocked = true; emitVoice(); });
+    voice.remotes.set(id, { audio });
+    addMeter(id, stream);
+  }
+  function removeRemote(id) {
+    const r = voice.remotes.get(id);
+    if (!r) return;
+    r.audio.srcObject = null;
+    r.audio.remove();
+    voice.remotes.delete(id);
+    removeMeter(id);
+  }
+  function removeAllRemotes() { [...voice.remotes.keys()].forEach(removeRemote); }
+
+  function onRoster(users) {
+    voice.roster = users;
+    const ids = new Set(users.map((u) => u.id));
+    for (const id of [...voice.remotes.keys()]) if (!ids.has(id)) removeRemote(id);
+    emitVoice();
+  }
+
+  async function getMic() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error("This browser can't use the microphone here.");
+    }
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        video: false,
+      });
+    } catch (e) {
+      throw new Error(e && e.name === 'NotAllowedError'
+        ? 'Microphone permission was denied. Allow it in your browser settings to use voice chat.'
+        : "Couldn't access a microphone.");
+    }
+  }
+
+  // The host's hub: who is in voice and which forwarding calls exist.
+  let hub = null;
+
+  async function voiceJoin(myId) {
+    if (voice.joined) return;
+    if (!hosting && !guest) throw new Error('Join a room first');
+    // Resume audio inside the click that started voice, so phones allow playback.
+    try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); await audioCtx.resume(); } catch {}
+    voice.local = await getMic();
+    voice.myId = myId;
+    voice.joined = true;
+    voice.muted = false;
+    addMeter(myId, voice.local);
+    if (hosting) hub.add(myId, null, voice.local, null);
+    else callHost();
+    emitVoice();
+  }
+
+  function voiceLeave() {
+    if (!voice.joined) return;
+    if (hosting) hub.remove(voice.myId);
+    else {
+      if (guest && guest.micCall) { try { guest.micCall.close(); } catch {} guest.micCall = null; }
+      sendToHost({ t: 'voice', op: 'leave' });
+    }
+    if (voice.local) voice.local.getTracks().forEach((tr) => tr.stop());
+    removeMeter(voice.myId);
+    voice.local = null;
+    voice.joined = false;
+    voice.muted = false;
+    removeAllRemotes();
+    emitVoice();
+  }
+
+  function voiceMute(muted) {
+    if (!voice.joined) return;
+    voice.muted = !!muted;
+    voice.local.getAudioTracks().forEach((tr) => { tr.enabled = !voice.muted; });
+    if (hosting) hub.setMuted(voice.myId, voice.muted);
+    else sendToHost({ t: 'voice', op: 'mute', muted: voice.muted });
+    emitVoice();
+  }
+
+  function voiceUnlock() {
+    voice.blocked = false;
+    for (const r of voice.remotes.values()) r.audio.play().catch(() => { voice.blocked = true; });
+    if (audioCtx) audioCtx.resume().catch(() => {});
+    emitVoice();
+  }
+
+  function makeHub(peer) {
+    const users = new Map(); // id -> { id, peerId (null = host), stream, inCall, muted, out: Map(srcId -> call) }
+    const conns = new Map(); // remote peer id -> game connection
+    const closeCall = (c) => { try { c && c.close(); } catch {} };
+
+    // Deliver one player's audio to one listener.
+    function deliver(dst, srcId, stream) {
+      if (!dst.peerId) { if (srcId !== dst.id) playRemote(srcId, stream); return; }
+      const call = peer.call(dst.peerId, stream, { metadata: { from: srcId } });
+      dst.out.set(srcId, call);
+    }
+    function roster() {
+      const list = [...users.values()].map((u) => ({ id: u.id, muted: u.muted }));
+      const msg = JSON.stringify({ t: 'voiceRoster', users: list });
+      for (const c of conns.values()) c.send(msg);
+      onRoster(list);
+    }
+    function add(id, peerId, stream, inCall) {
+      remove(id, true);
+      const u = { id, peerId, stream, inCall, muted: false, out: new Map() };
+      for (const other of users.values()) {
+        deliver(other, id, stream);
+        deliver(u, other.id, other.stream);
+      }
+      users.set(id, u);
+      roster();
+    }
+    function remove(id, quiet) {
+      const u = users.get(id);
+      if (!u) return;
+      users.delete(id);
+      closeCall(u.inCall);
+      u.out.forEach(closeCall);
+      for (const other of users.values()) {
+        closeCall(other.out.get(id));
+        other.out.delete(id);
+      }
+      removeRemote(id);
+      if (!quiet) roster();
+    }
+    function setMuted(id, muted) {
+      const u = users.get(id);
+      if (u) { u.muted = !!muted; roster(); }
+    }
+
+    // A player's mic arriving at the host.
+    peer.on('call', (call) => {
+      const conn = conns.get(call.peer);
+      if (!conn || !conn.player || !call.metadata || call.metadata.kind !== 'mic') { closeCall(call); return; }
+      const id = conn.player.id;
+      call.answer();
+      call.on('stream', (stream) => {
+        const existing = users.get(id);
+        if (existing && existing.inCall === call) return; // same call firing again
+        add(id, call.peer, stream, call);
+      });
+      call.on('close', () => { const u = users.get(id); if (u && u.inCall === call) remove(id); });
+      call.on('error', () => { const u = users.get(id); if (u && u.inCall === call) remove(id); });
+    });
+
+    return {
+      add,
+      remove,
+      setMuted,
+      connOpened(peerId, conn) {
+        conns.set(peerId, conn);
+        if (users.size) conn.send(JSON.stringify({ t: 'voiceRoster', users: [...users.values()].map((u) => ({ id: u.id, muted: u.muted })) }));
+      },
+      connClosed(peerId, conn) {
+        conns.delete(peerId);
+        if (conn.player) remove(conn.player.id);
+      },
+      message(conn, msg) {
+        if (!conn.player) return;
+        if (msg.op === 'leave') remove(conn.player.id);
+        else if (msg.op === 'mute') setMuted(conn.player.id, msg.muted);
+      },
+      closeAll() { [...users.keys()].forEach((id) => remove(id, true)); },
+    };
+  }
+
+  // Guest side: the current connection to the host.
+  let guest = null; // { peer, dc, hostId, micCall }
+  function sendToHost(obj) {
+    if (guest && guest.dc && guest.dc.open) { try { guest.dc.send(JSON.stringify(obj)); } catch {} }
+  }
+  function callHost() {
+    if (!guest || !voice.local) return;
+    guest.micCall = guest.peer.call(guest.hostId, voice.local, { metadata: { kind: 'mic' } });
+    if (voice.muted) sendToHost({ t: 'voice', op: 'mute', muted: true });
+  }
+
   // ---------- hosting ----------
   let hosting = null; // { peer, rooms, code }
 
@@ -133,6 +385,7 @@
       canCreate: (conn) => conn.isLocal,
     });
 
+    hub = makeHub(peer);
     const room = () => rooms.rooms.get(code);
     const note = (text) => { const r = room(); if (r) { rooms.system(r, text); rooms.touch(r); } };
 
@@ -141,7 +394,6 @@
       const watchdog = setTimeout(() => {
         if (!dc.open) note('Someone tried to join but couldn\'t connect. One of your networks may be blocking it; switching between Wi-Fi and mobile data often helps.');
       }, 25000);
-      dc.on('open', () => clearTimeout(watchdog));
       const conn = {
         player: null,
         roomCode: null,
@@ -149,8 +401,20 @@
         get readyState() { return dc.open ? 1 : 3; },
         send(s) { try { dc.send(s); } catch {} },
       };
-      dc.on('data', (d) => onMessage(conn, d));
+      dc.on('open', () => { clearTimeout(watchdog); hub.connOpened(dc.peer, conn); });
+      dc.on('data', (d) => {
+        // Voice control messages are handled here; everything else goes to the game engine.
+        if (typeof d === 'string' && d.startsWith('{"t":"voice"')) {
+          try { hub.message(conn, JSON.parse(d)); } catch {}
+          return;
+        }
+        onMessage(conn, d);
+      });
+      let closed = false;
       const gone = () => {
+        if (closed) return;
+        closed = true;
+        hub.connClosed(dc.peer, conn);
         if (conn.roomCode) rooms.disconnect(conn.roomCode, conn);
         conn.roomCode = null;
       };
@@ -199,6 +463,8 @@
 
   function stopHosting() {
     if (!hosting) return;
+    voiceLeave();
+    hub.closeAll();
     hosting.rooms.saveNow();
     hosting.peer.destroy();
     hosting = null;
@@ -212,6 +478,7 @@
     const fail = (reason) => {
       if (done) return;
       done = true;
+      if (guest && guest.peer === peer) { guest = null; removeAllRemotes(); }
       clearTimeout(timer);
       t._closed(reason);
       try { peer.destroy(); } catch {}
@@ -222,15 +489,32 @@
     const timer = setTimeout(() => fail(stage === 'signaling' ? 'no-signaling' : 'blocked'), 20000);
     t.close = () => fail('closed');
 
+    const hostId = PREFIX + code;
+    // Forwarded voice from the host (one call per other player in voice).
+    peer.on('call', (call) => {
+      if (call.peer !== hostId || !voice.joined) { try { call.close(); } catch {} return; }
+      const from = call.metadata && call.metadata.from;
+      call.answer();
+      call.on('stream', (stream) => playRemote(from, stream));
+    });
+
     peer.on('open', () => {
       stage = 'connecting';
-      const dc = peer.connect(PREFIX + code, { reliable: true });
+      const dc = peer.connect(hostId, { reliable: true });
       dc.on('open', () => {
         clearTimeout(timer);
+        guest = { peer, dc, hostId, micCall: null };
         t._send = (s) => { try { dc.send(s); } catch {} };
         t._open();
+        if (voice.joined) callHost(); // back after a reconnect: rejoin voice
       });
-      dc.on('data', (d) => t._deliver(d));
+      dc.on('data', (d) => {
+        if (typeof d === 'string' && d.startsWith('{"t":"voiceRoster"')) {
+          try { onRoster(JSON.parse(d).users); } catch {}
+          return;
+        }
+        t._deliver(d);
+      });
       dc.on('close', () => fail('closed'));
       dc.on('error', () => fail('closed'));
     });
@@ -257,6 +541,13 @@
     isHosting: () => !!hosting,
     hostOnline: () => !!lastOnline,
     onHostStatus: (fn) => statusListeners.push(fn),
+    voiceSupported: () => !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.RTCPeerConnection),
+    voiceJoin,
+    voiceLeave,
+    voiceMute,
+    voiceUnlock,
+    voiceState,
+    onVoice: (fn) => voice.listeners.push(fn),
     hostingCode: () => (hosting ? hosting.code : null),
     lastHosted: () => {
       const c = store.get(LAST_KEY);
