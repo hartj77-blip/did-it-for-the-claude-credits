@@ -1,0 +1,38 @@
+{
+  "room_name": "Board Room",
+
+  "mailbox": {
+    "enabled": true,
+    "address": "boardroom@yourcompany.com",
+    "imap_host": "imap.gmail.com",
+    "imap_port": 993,
+    "smtp_host": "smtp.gmail.com",
+    "smtp_port": 465,
+    "password_env": "MEETINGBOX_PASSWORD"
+  },
+
+  "auto_accept": true,
+  "decline_conflicts": true,
+  "accept_from_domains": [],
+
+  "calendar_feeds": [],
+
+  "auto_join": false,
+  "join_early_seconds": 60,
+
+  "launch": {
+    "zoom": "app",
+    "teams": "app",
+    "meet": "browser",
+    "webex": "browser",
+    "browser_command": [
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "--new-window",
+      "--start-fullscreen",
+      "{url}"
+    ]
+  },
+
+  "poll_seconds": 60,
+  "port": 8765
+}
