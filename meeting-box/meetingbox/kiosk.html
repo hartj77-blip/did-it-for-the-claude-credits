@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meeting Box</title>
+<style>
+  :root {
+    --bg: #0f1216; --panel: #181d23; --line: #262d36; --text: #eef1f4; --dim: #8a94a1;
+    --accent: #3d8bfd; --live: #23a55a; --warn: #e5a50a; --bad: #e5484d;
+    --teams: #6264a7; --zoom: #2d8cff; --meet: #00897b; --webex: #07c160;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif; }
+  body { display: grid; grid-template-rows: auto 1fr auto; padding: 28px 40px; gap: 24px; }
+  header { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
+  .room { font-size: 34px; font-weight: 600; }
+  .addr { color: var(--dim); font-size: 18px; margin-top: 4px; }
+  .clock { text-align: right; }
+  .clock .t { font-size: 56px; font-weight: 300; line-height: 1; font-variant-numeric: tabular-nums; }
+  .clock .d { color: var(--dim); font-size: 18px; margin-top: 6px; }
+  main { display: grid; grid-template-columns: 1.3fr 1fr; gap: 24px; min-height: 0; }
+  @media (max-width: 900px) {
+    html, body { height: auto; }
+    body { padding: 16px; grid-template-rows: auto auto auto; grid-template-columns: minmax(0, 1fr); }
+    .clock { text-align: left; }
+    main { grid-template-columns: minmax(0, 1fr); }
+    .side { grid-template-rows: auto auto; }
+    ul { max-height: none; }
+    section { padding: 20px; }
+    .room { font-size: 26px; } .clock .t { font-size: 40px; } .hero-title { font-size: 30px; }
+    .join { width: 100%; padding: 18px; font-size: 22px; }
+    li { grid-template-columns: 76px 1fr auto; }
+  }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 28px; min-height: 0; }
+  h2 { margin: 0 0 18px; font-size: 15px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); font-weight: 600; }
+  .hero-title { font-size: 40px; font-weight: 600; margin: 6px 0 10px; line-height: 1.15; }
+  .hero-meta { color: var(--dim); font-size: 20px; }
+  .badge { display: inline-flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 600;
+    padding: 6px 12px; border-radius: 999px; background: var(--line); }
+  .badge i { width: 10px; height: 10px; border-radius: 50%; background: var(--dim); }
+  .p-teams i { background: var(--teams); } .p-zoom i { background: var(--zoom); }
+  .p-meet i { background: var(--meet); } .p-webex i { background: var(--webex); }
+  .live { color: var(--live); font-weight: 600; }
+  button { font: inherit; color: inherit; border: 0; cursor: pointer; border-radius: 14px; }
+  .join { background: var(--accent); color: #fff; font-size: 28px; font-weight: 600; padding: 22px 48px; margin-top: 28px; }
+  .join.now { background: var(--live); }
+  .join:active, .small:active { transform: scale(.98); }
+  .empty { color: var(--dim); font-size: 22px; margin-top: 8px; }
+  ul { list-style: none; margin: 0; padding: 0; overflow: auto; max-height: 100%; }
+  li { display: grid; grid-template-columns: 92px 1fr auto; gap: 14px; align-items: center;
+    padding: 14px 0; border-top: 1px solid var(--line); }
+  li:first-child { border-top: 0; }
+  .when { font-size: 20px; font-variant-numeric: tabular-nums; }
+  .what { min-width: 0; }
+  .what b { display: block; font-size: 19px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .what span { color: var(--dim); font-size: 15px; }
+  .small { background: var(--line); padding: 12px 20px; font-size: 17px; font-weight: 600; }
+  .side { display: grid; grid-template-rows: 1fr auto; grid-template-columns: minmax(0, 1fr); gap: 24px; min-height: 0; }
+  form { display: flex; gap: 10px; }
+  input { flex: 1; min-width: 0; font: inherit; font-size: 18px; color: var(--text); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  input:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  footer { color: var(--dim); font-size: 14px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .err { color: var(--bad); }
+  .toast { position: fixed; left: 50%; bottom: 36px; transform: translateX(-50%); background: #000c;
+    padding: 14px 22px; border-radius: 12px; font-size: 18px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <div><div class="room" id="room">Meeting Box</div><div class="addr" id="addr"></div></div>
+  <div class="clock"><div class="t" id="time"></div><div class="d" id="date"></div></div>
+</header>
+
+<main>
+  <section id="hero"><h2>Next meeting</h2><div class="empty">Loading…</div></section>
+  <div class="side">
+    <section><h2>Today</h2><ul id="list"></ul></section>
+    <section>
+      <h2>Join with a link</h2>
+      <form id="paste">
+        <input id="url" placeholder="Paste a Teams, Zoom or Meet link" autocomplete="off" inputmode="url">
+        <button class="small" type="submit">Join</button>
+      </form>
+    </section>
+  </div>
+</main>
+
+<footer><span id="sync"></span><span id="activity"></span></footer>
+<div class="toast" id="toast"></div>
+
+<script>
+const NAMES = { teams: "Microsoft Teams", zoom: "Zoom", meet: "Google Meet", webex: "Webex" };
+let state = null;
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const hm = d => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+const badge = p => p ? `<span class="badge p-${p}"><i></i>${NAMES[p]}</span>` : `<span class="badge"><i></i>No video link</span>`;
+
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 3500);
+}
+
+async function post(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Meeting-Box": "1" }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || "Something went wrong");
+  return j;
+}
+
+async function join(key) {
+  try { await post("/api/join", { key }); toast("Opening meeting…"); }
+  catch (e) { toast(e.message); }
+}
+
+function render() {
+  if (!state) return;
+  const now = new Date();
+  const today = state.meetings.filter(m => new Date(m.start).toDateString() === now.toDateString() || new Date(m.end) > now && new Date(m.start) < now);
+  const timed = state.meetings.filter(m => !m.all_day && new Date(m.end) > now);
+  const current = timed.find(m => new Date(m.start) <= now);
+  const next = current || timed[0];
+
+  $("room").textContent = state.room_name;
+  $("addr").textContent = state.address ? `Invite this room: ${state.address}` : "";
+
+  if (!next) {
+    $("hero").innerHTML = `<h2>Next meeting</h2><div class="empty">Nothing else booked today. Use a link on the right to start an ad-hoc call.</div>`;
+  } else {
+    const s = new Date(next.start), e = new Date(next.end);
+    const mins = Math.round((s - now) / 60000);
+    const when = current ? `<span class="live">● In progress</span> · until ${hm(e)}`
+      : mins < 60 ? `Starts in ${mins} min · ${hm(s)}–${hm(e)}`
+      : `${s.toDateString() === now.toDateString() ? "" : s.toLocaleDateString([], { weekday: "long" }) + " "}${hm(s)}–${hm(e)}`;
+    const soon = current || mins <= 10;
+    $("hero").innerHTML = `<h2>${current ? "Now" : "Next meeting"}</h2>
+      ${badge(next.platform)}
+      <div class="hero-title">${esc(next.title)}</div>
+      <div class="hero-meta">${when}</div>
+      ${next.organizer ? `<div class="hero-meta">${esc(next.organizer)}</div>` : ""}
+      ${next.url ? `<button class="join ${soon ? "now" : ""}" data-key="${esc(next.key)}">Join ${NAMES[next.platform]}</button>` : ""}`;
+  }
+
+  $("list").innerHTML = today.length ? today.map(m => {
+    const s = new Date(m.start), past = new Date(m.end) <= now;
+    return `<li style="${past ? "opacity:.45" : ""}">
+      <div class="when">${m.all_day ? "All day" : hm(s)}</div>
+      <div class="what"><b>${esc(m.title)}</b><span>${m.platform ? NAMES[m.platform] : "No video link"}</span></div>
+      ${m.url && !past ? `<button class="small" data-key="${esc(m.key)}">Join</button>` : "<span></span>"}
+    </li>`;
+  }).join("") : `<div class="empty">No meetings today.</div>`;
+
+  const st = state.status;
+  $("sync").innerHTML = st.current_error
+    ? `<span class="err">⚠ ${esc(st.current_error)}</span>`
+    : st.last_sync ? `Mailbox checked ${hm(new Date(st.last_sync))}` : "Checking mailbox…";
+  $("activity").textContent = st.activity[0] ? st.activity[0].text : "";
+}
+
+function tick() {
+  const now = new Date();
+  $("time").textContent = hm(now);
+  $("date").textContent = now.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
+  render();
+}
+
+async function load() {
+  try { state = await (await fetch("/api/state")).json(); render(); }
+  catch { $("sync").innerHTML = `<span class="err">⚠ Meeting box service is not running</span>`; }
+}
+
+document.addEventListener("click", e => {
+  const b = e.target.closest("button[data-key]");
+  if (b) join(b.dataset.key);
+});
+$("paste").addEventListener("submit", async e => {
+  e.preventDefault();
+  const url = $("url").value.trim();
+  if (!url) return;
+  try { await post("/api/join-url", { url }); $("url").value = ""; toast("Opening meeting…"); }
+  catch (err) { toast(err.message); }
+});
+
+tick(); load();
+setInterval(tick, 1000 * 15);
+setInterval(load, 1000 * 15);
+</script>
+</body>
+</html>
